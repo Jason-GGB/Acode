@@ -4,91 +4,106 @@
 
 <h1 align="center">Acode</h1>
 
-<p align="center"><strong>Your Windows AI assistant, one shortcut away</strong></p>
-<p align="center">Questions · Code · Documents</p>
+<p align="center">A desktop assistant for questions, code, and documents — one shortcut away.</p>
 
 <p align="center">
-  English &nbsp;·&nbsp; <a href="./README.zh-CN.md">简体中文</a>
-  &nbsp;·&nbsp; <a href="../../releases">Download</a>
+  English
+  &nbsp;·&nbsp; <a href="./README.zh-CN.md">简体中文</a>
+  &nbsp;·&nbsp; <a href="https://github.com/Jason-GGB/Acode/releases">Download</a>
   &nbsp;·&nbsp; <a href="./docs/README.md">Documentation</a>
 </p>
 
-<p align="center"><sub>Windows 10 / 11 &nbsp;·&nbsp; v0.2.34 &nbsp;·&nbsp; MIT</sub></p>
+<p align="center"><sub>Windows 10 / 11 · macOS · v0.1.0 · MIT</sub></p>
 
 ---
 
 ## What it does
 
-| Feature                | What you can do                                                                                      |
-| ---------------------- | ---------------------------------------------------------------------------------------------------- |
-| **Ask anywhere**       | Double-tap Alt to open the overlay with files or images.                                             |
-| **Work on projects**   | Organize workspaces and chats, run tasks, and review changes.                                        |
-| **Personalize Acode**   | Set up a local profile and avatar, review usage activity, and import or export profile information.  |
-| **Handle documents**   | Generate, read, convert, and render Word / Excel / PowerPoint files; deliver them as cards.          |
-| **Choose your model**  | Configure DeepSeek, OpenAI-compatible, or Anthropic-compatible providers.                            |
-| **Extend your tools**  | Use skills, MCP, and plugins; manually enable computer use and OpenCLI.                              |
-| **Connect your phone** | Chat, approve actions, and transfer files with [Companion](https://github.com/rururunu/AnyaAndroid). |
+Acode stays on your machine. Open a floating overlay from any app, or work in a full window with workspaces, tools, and file previews.
 
-DeepSeek models use natively integrated dsh core tools and prompts while retaining enabled Acode plugin and MCP tools plus plugin management. Cache usage, response timing, and retries are recorded. Other models use Acode's general tool set. See [DeepSeek integration](./docs/deepseek-harness.md).
+| Feature                  | What you can do                                                                                          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| **Ask anywhere**         | Double-tap Alt to open the overlay and attach files or images. On macOS this key is Option.              |
+| **Work on a project**    | Keep workspaces and chats, run tasks, and review changes.                                                |
+| **Choose a model**       | Use DeepSeek, or any OpenAI-compatible or Anthropic-compatible provider.                                 |
+| **Handle documents**     | Generate, read, convert, and render Word, Excel, and PowerPoint files, then deliver them as cards.       |
+| **Extend the agent**     | Add skills, MCP servers, and plugins. Computer use (Windows) and OpenCLI stay off until you enable them. |
+| **Use your phone**       | Chat, approve actions, and transfer files with [Companion](https://github.com/rururunu/AnyaAndroid).     |
+| **Keep a local profile** | Set a name and avatar, review usage, and import or export your profile.                                  |
 
-## Get started
+DeepSeek models run on the integrated dsh tool set and still keep the plugins and MCP servers you enabled. Other models use Acode's general tools. Details: [DeepSeek integration](./docs/deepseek-harness.md).
 
-Alt+Alt captures selected text before the overlay takes focus and displays a compact inline reference tag. Chrome / Edge users can optionally install the [Selection Bridge](./browser-extension/README.md) for webpage selection and source URLs.
+## Install
 
-The **Profile** settings page shows local usage insights and lets you transfer your profile, settings, and API keys. Treat exported files as sensitive. A factory reset is available from the profile actions.
+Download a build from [Releases](https://github.com/Jason-GGB/Acode/releases).
 
-The chat composer keeps model and thinking controls on the right; on narrow windows, controls collapse to icons. In the overlay and workbench, `#` suggests skills, plugins, and MCP servers, `@` suggests workspace files, and `/` suggests commands. These suggestions also appear when editing a sent message. When an update is available, open it from the workbench sidebar or **Settings → About** to review the release notes before installing.
+| Platform              | Installer                     |
+| --------------------- | ----------------------------- |
+| macOS (Apple Silicon) | `Acode_<version>_aarch64.dmg` |
+| Windows 10 / 11 (x64) | `Acode_<version>_x64.msi`     |
 
-1. Download and install the MSI from [Releases](../../releases).
-2. Open **Settings**, add a model provider, and configure its credentials.
-3. Start a chat in the workbench, or double-tap **Alt** to open the overlay.
+On macOS, open the disk image and drag Acode into Applications. The current build is not notarized; if the system blocks the first launch, allow Acode in **System Settings → Privacy & Security**.
 
-Fallback shortcut: <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Space</kbd>.
+1. Open **Settings** and add a model provider with its credentials.
+2. Start a chat in the workbench, or double-tap **Alt** / **Option** to open the overlay.
 
-| Mode  | Purpose                                                     |
-| ----- | ----------------------------------------------------------- |
-| Ask   | Read-only questions and research                            |
-| Agent | Complete tasks with tools under your approval policy        |
-| Plan  | Prepare a plan before approved write operations             |
-| Image | Generate images with a separately configured image provider |
+The fallback shortcut is <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Space</kbd>.
 
-Permissions are separate from chat mode: **Read-only** blocks file changes and arbitrary shell commands; **Workspace-write** allows workspace file edits and asks before each shell command or external-path access; **Full-access** skips these approval prompts while retaining command safety rules. Approving a request allows that operation once and cannot override Read-only.
+## Everyday use
 
-The workbench and overlay recover pending questions and approvals when opened or focused. Successful code reads appear as expandable syntax-highlighted cards; click the filename to open a sidebar and highlight the read lines. The sidebar can wrap long lines; when the file has changed, it preserves the captured excerpt and can show the current file context. See [permissions and code preview](./docs/permissions-and-preview.md).
+| Mode  | Use it for                                           |
+| ----- | ---------------------------------------------------- |
+| Ask   | Read-only questions and research                     |
+| Agent | Tasks that can use tools, under your approval policy |
+| Plan  | A plan first; writes wait until you approve          |
+| Image | Images from a separately configured image provider   |
 
-The Diff sidebar shows files in one continuous list. Its file tree navigates to a file, collapses automatically when space is tight, and can be toggled manually. Streaming replies and long diff lists defer unnecessary rendering to reduce interface stalls during Agent runs.
+Permissions are independent of the mode above:
 
-Office layout, conversion, and formula results need checks for each artifact. Some search and extension features require additional setup. See [Office workflows](./docs/office.md) and [plugins](./docs/plugin-system.md).
+| Permission      | Effect                                                                                             |
+| --------------- | -------------------------------------------------------------------------------------------------- |
+| Read-only       | Blocks file changes and arbitrary shell commands                                                   |
+| Workspace-write | Edits files inside the workspace, and asks before each shell command or path outside the workspace |
+| Full access     | Skips those approval prompts and still applies command safety rules                                |
+
+Approving a prompt allows that operation once. An approval cannot override Read-only. Pending questions and approvals come back when you focus the workbench or the overlay. See [permissions and code preview](./docs/permissions-and-preview.md).
+
+In the composer, `#` suggests skills, plugins, and MCP servers, `@` suggests workspace files, and `/` suggests commands. The same suggestions appear when you edit a sent message. Model and thinking controls sit on the right and collapse to icons when the window is narrow.
+
+Double-tap Alt captures the current selection before the overlay takes focus and shows it as a compact tag. Chrome and Edge can add the optional [Selection Bridge](./browser-extension/README.md) for webpage selections and source URLs.
+
+When an update is available, open it from the workbench sidebar or **Settings → About**, read the notes, then install.
+
+Office layout, conversion, and formula results need a check on each file. Some search and extension features need extra setup. See [Office workflows](./docs/office.md) and [plugins](./docs/plugin-system.md).
 
 ## Data and privacy
 
-Settings, credentials, and chat history stay on your machine by default. Sending a message sends its text and attached context to your configured model provider. Search, remote MCP, cloud sync, and phone connections also send relevant data to their services or devices when enabled.
+Settings, credentials, and chat history stay on this computer. A message sends its text and attached context to the model provider you configured. Search, remote MCP, cloud sync, and the phone connection also send the related data to those services or devices when you turn them on.
 
-Custom background images are stored as local files; runtime settings keep their paths. Readable images are included when you export a portable profile.
+Custom backgrounds are local files; settings store the path. A portable profile export includes images it can read. Treat an exported profile as sensitive: it can contain settings and API keys. A factory reset is available from the profile actions.
 
-## Development
+## Develop
 
-Requires Node.js 18+, pnpm, Rust stable, Visual Studio C++ Build Tools, and WebView2.
+| Requirement    | Notes                                                  |
+| -------------- | ------------------------------------------------------ |
+| Node.js 22.19+ | The Office runtime is bundled from this Node binary    |
+| pnpm 10        |                                                        |
+| Rust stable    |                                                        |
+| Windows        | Visual Studio C++ Build Tools and the WebView2 runtime |
+| macOS          | Xcode Command Line Tools                               |
 
 ```bash
 pnpm install
 pnpm tauri:dev
 ```
 
-<details>
-<summary>Check and build commands</summary>
-
 ```bash
-pnpm check
-cd src-tauri
-cargo test --lib
-cd ..
-pnpm tauri:build
+pnpm check          # types, lint, and unit tests
+cd src-tauri && cargo test --lib && cd ..
+pnpm tauri:build    # installer for the current platform
 ```
 
-</details>
-
-Built with **Tauri 2 + Vue 3 + TypeScript + Rust**.
+Built with Tauri 2, Vue 3, TypeScript, and Rust. Release signing and in-app updates are documented in [Releases and updates](./docs/release.md).
 
 ## Documentation
 
@@ -103,8 +118,8 @@ Built with **Tauri 2 + Vue 3 + TypeScript + Rust**.
 
 IDE context plugins: [VS Code](https://marketplace.visualstudio.com/items?itemName=Acode.acode-ide-context) · [IntelliJ Platform](https://plugins.jetbrains.com/plugin/33163-acode-ide-context).
 
-## License and acknowledgments
+## License
 
-Licensed under [MIT](./LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+[MIT](./LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
 
 Thanks to [Ghost](https://github.com/NORTHTEKDevs/ghost), [OpenCLI](https://github.com/jackwener/OpenCLI), and the open-source tools and artwork used in Acode.
