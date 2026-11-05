@@ -36,11 +36,7 @@ fn store() -> &'static Mutex<HashMap<String, ActiveUpload>> {
 }
 
 fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 180
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    super::companion_workspace::session_can_own_inbox(id)
 }
 
 // Reject redirects anywhere below the trusted root, including Windows junctions.
@@ -282,19 +278,24 @@ fn bound_workspace(
     session_id: &str,
     workspace_id: Option<&str>,
 ) -> Option<crate::core::workspace::Workspace> {
+    use super::companion_workspace::{project_companion_workspace, CompanionWorkspace};
+
     let state = app.try_state::<AppState>()?;
-    let list = state.core.workspaces().list();
-    if let Some(id) = workspace_id.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(found) = list.iter().find(|w| w.id == id).cloned() {
-            return Some(found);
-        }
-    }
+    let workspaces = state.core.workspaces().list();
     let bound = state
         .core
         .chat()
         .conversation()
-        .workspace_for_session(session_id)?;
-    list.into_iter().find(|w| w.id == bound)
+        .workspace_for_session(session_id);
+    match project_companion_workspace(
+        workspace_id,
+        bound.as_deref(),
+        &workspaces,
+        Some(session_id),
+    ) {
+        CompanionWorkspace::Workspace(workspace) => Some(workspace.clone()),
+        CompanionWorkspace::Inbox { .. } | CompanionWorkspace::NoRoot => None,
+    }
 }
 
 fn dest_dir(

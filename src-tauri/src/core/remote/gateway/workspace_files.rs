@@ -10,7 +10,7 @@ pub(super) fn workspace_snapshot_payload(
     app: &AppHandle,
     session_id: Option<&str>,
 ) -> serde_json::Value {
-    let Some(workspace) = resolve_workspace(app, session_id, None) else {
+    let SessionFileRoot::Workspace(workspace) = session_file_root(app, session_id, None) else {
         return json!({
             "workspaceId": null,
             "name": null,
@@ -30,40 +30,38 @@ pub(super) fn workspace_snapshot_payload(
     })
 }
 
-fn resolve_workspace(
+enum SessionFileRoot {
+    Workspace(crate::core::workspace::Workspace),
+    Inbox(std::path::PathBuf),
+    NoRoot,
+}
+
+fn session_file_root(
     app: &AppHandle,
     session_id: Option<&str>,
     workspace_id: Option<&str>,
-) -> Option<crate::core::workspace::Workspace> {
-    let state = app.try_state::<AppState>()?;
-    let manager = state.core.workspaces();
-    let list = manager.list();
-    if let Some(id) = workspace_id.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(found) = list.into_iter().find(|w| w.id == id) {
-            return Some(found);
-        }
-    }
-    if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
-        let snapshot = crate::core::remote::bridge::build_session_snapshot(app);
-        if let Some(sessions) = snapshot.get("sessions").and_then(|v| v.as_array()) {
-            if let Some(ws_id) = sessions
-                .iter()
-                .find(|item| item.get("id").and_then(|v| v.as_str()) == Some(sid))
-                .and_then(|item| item.get("workspaceId"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                let list = manager.list();
-                if let Some(found) = list.into_iter().find(|w| w.id == ws_id) {
-                    return Some(found);
-                }
+) -> SessionFileRoot {
+    use crate::core::remote::companion_workspace::{
+        project_companion_workspace, CompanionWorkspace,
+    };
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return SessionFileRoot::NoRoot;
+    };
+    let session_id = session_id.map(str::trim).filter(|id| !id.is_empty());
+    let workspaces = state.core.workspaces().list();
+    let bound =
+        session_id.and_then(|id| state.core.chat().conversation().workspace_for_session(id));
+    match project_companion_workspace(workspace_id, bound.as_deref(), &workspaces, session_id) {
+        CompanionWorkspace::Workspace(workspace) => SessionFileRoot::Workspace(workspace.clone()),
+        CompanionWorkspace::Inbox { session_id } => {
+            match crate::core::remote::upload::inbox_dir(app, &session_id) {
+                Some(root) => SessionFileRoot::Inbox(root),
+                None => SessionFileRoot::NoRoot,
             }
         }
+        CompanionWorkspace::NoRoot => SessionFileRoot::NoRoot,
     }
-    manager
-        .current()
-        .or_else(|| manager.list().into_iter().next())
 }
 
 fn guess_mime(path: &std::path::Path) -> &'static str {
@@ -180,9 +178,12 @@ fn resolve_download_path(
     if let Some(file) = resolve_shared_asset(app, rel_path) {
         return Ok(file);
     }
-    let workspace = resolve_workspace(app, session_id, workspace_id)
-        .ok_or_else(|| "No workspace selected".to_string())?;
-    resolve_in_workspace(&workspace.root, rel_path)
+    let root = match session_file_root(app, session_id, workspace_id) {
+        SessionFileRoot::Workspace(workspace) => workspace.root,
+        SessionFileRoot::Inbox(root) => root,
+        SessionFileRoot::NoRoot => return Err("No workspace selected".into()),
+    };
+    resolve_in_workspace(&root, rel_path)
 }
 
 pub(super) fn begin_file_download(
@@ -312,47 +313,60 @@ fn should_descend_workspace_entry(entry: &walkdir::DirEntry) -> bool {
     )
 }
 
+fn list_files_under(root: std::path::PathBuf) -> Vec<String> {
+    let mut files = walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(should_descend_workspace_entry)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            entry
+                .path()
+                .strip_prefix(&root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+        })
+        .take(5_000)
+        .collect::<Vec<_>>();
+    files.sort_unstable_by_key(|path| path.to_lowercase());
+    files
+}
+
 pub(super) async fn list_workspace_files_payload(
     app: &AppHandle,
     session_id: Option<&str>,
     workspace_id: Option<&str>,
 ) -> serde_json::Value {
-    let Some(workspace) = resolve_workspace(app, session_id, workspace_id) else {
-        return json!({
-            "workspaceId": null,
-            "name": null,
-            "rootPath": null,
-            "files": [],
-            "error": "No workspace selected"
-        });
+    let (id, name, root_path, root) = match session_file_root(app, session_id, workspace_id) {
+        SessionFileRoot::NoRoot => {
+            return json!({
+                "workspaceId": null,
+                "name": null,
+                "rootPath": null,
+                "files": [],
+                "error": "No workspace selected"
+            });
+        }
+        SessionFileRoot::Inbox(root) => (None, None, None, root),
+        SessionFileRoot::Workspace(workspace) => {
+            let root = workspace.root.clone();
+            let root_path = workspace.root.to_string_lossy().into_owned();
+            (
+                Some(workspace.id),
+                Some(workspace.name),
+                Some(root_path),
+                root,
+            )
+        }
     };
-    let root = workspace.root.clone();
-    let files = tauri::async_runtime::spawn_blocking(move || {
-        let mut files = walkdir::WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(should_descend_workspace_entry)
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .filter_map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(&root)
-                    .ok()
-                    .map(|path| path.to_string_lossy().replace('\\', "/"))
-            })
-            .take(5_000)
-            .collect::<Vec<_>>();
-        files.sort_unstable_by_key(|path| path.to_lowercase());
-        files
-    })
-    .await
-    .unwrap_or_default();
-
+    let files = tauri::async_runtime::spawn_blocking(move || list_files_under(root))
+        .await
+        .unwrap_or_default();
     json!({
-        "workspaceId": workspace.id,
-        "name": workspace.name,
-        "rootPath": workspace.root.to_string_lossy(),
+        "workspaceId": id,
+        "name": name,
+        "rootPath": root_path,
         "files": files,
     })
 }

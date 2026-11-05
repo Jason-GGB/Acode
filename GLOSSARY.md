@@ -1,6 +1,6 @@
 # Acode
 
-桌面助手里，一次会话如何把工具交给模型、在计划被批准前拦住写入、模型不再调用工具时这一轮如何结束，以及一条 session 在屏幕上呈现成什么样。
+桌面助手里，一次会话如何把工具交给模型、在计划被批准前拦住写入、模型不再调用工具时这一轮如何结束、一条 session 在屏幕上呈现成什么样，以及一条 Companion 会话落在哪个工作区。
 
 ## Language
 
@@ -27,3 +27,7 @@ _Avoid_: TurnComplete, completion gate, verification queue
 **Session projection**:
 按一条 session 交出用户看得见的 turn、timeline，以及这条 session 是否还在输出。
 _Avoid_: view model, selector, derived state
+
+**Companion workspace**:
+一次投影给出这条 Companion 会话落在哪个工作区。没有绑定时，它的文件在这条会话自己的 inbox。
+_Avoid_: current workspace, first workspace

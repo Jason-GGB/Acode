@@ -5,6 +5,7 @@
 //! protocol under `/remote/v1`.
 
 mod bridge;
+mod companion_workspace;
 mod compose;
 mod download;
 mod gateway;
