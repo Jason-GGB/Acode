@@ -1,0 +1,537 @@
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+
+import { applyChromeFrostedGlass } from "@/services/overlay/appearance";
+import { isLocalImagePath, resolveChatImageSrc } from "@/services/chat/localImageSrc";
+import type { AppLanguage, ColorScheme } from "@/types/setting";
+import {
+  COLOR_SCHEME_CACHE_KEY,
+  CUSTOM_THEMES_CACHE_KEY,
+  isDarkTheme,
+  normalizeColorScheme,
+  readCachedColorScheme,
+} from "./catalog";
+
+import {
+  THEME_CHANGE_EVENT,
+  type CustomThemeConfig,
+  type ThemeAppearanceInput,
+  type ThemeChangeDetail,
+  type ThemeState,
+} from "./types";
+
+export { THEME_CHANGE_EVENT };
+export type { ThemeAppearanceInput, ThemeChangeDetail, ThemeState, ThemeId } from "./types";
+
+const CUSTOM_STYLE_TAG_ID = "acode-custom-theme-sheet";
+
+function rootElement(): HTMLElement {
+  return document.documentElement;
+}
+
+/** WebView2 inverts paints when color-scheme is dark; appearance is CSS tokens only. */
+export function documentColorScheme(_colorScheme: ColorScheme): "only light" {
+  return "only light";
+}
+
+function cacheColorScheme(colorScheme: ColorScheme) {
+  try {
+    localStorage.setItem(COLOR_SCHEME_CACHE_KEY, colorScheme);
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function cacheCustomThemes(themes?: CustomThemeConfig[]) {
+  if (!themes) return;
+  try {
+    // The boot cache only needs theme metadata. A pending data URI must never
+    // duplicate wallpaper bytes in another JSON store before Rust saves it.
+    const cached = themes.map((theme) => {
+      if (!theme.background?.image?.startsWith("data:")) return theme;
+      return { ...theme, background: { ...theme.background, image: undefined } };
+    });
+    localStorage.setItem(CUSTOM_THEMES_CACHE_KEY, JSON.stringify(cached));
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+export function readCachedCustomThemes(): CustomThemeConfig[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_THEMES_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const themes = parsed.filter(
+      (theme): theme is CustomThemeConfig =>
+        Boolean(theme) && typeof theme === "object" && typeof theme.id === "string",
+    );
+    if (!raw.includes("data:")) return themes;
+    // An older cache may still embed wallpaper bytes. Keep the palette and
+    // drop only the image, instead of forgetting every saved theme.
+    const stripped = themes.map((theme) => {
+      if (!theme.background?.image?.startsWith("data:")) return theme;
+      return { ...theme, background: { ...theme.background, image: undefined } };
+    });
+    cacheCustomThemes(stripped);
+    return stripped;
+  } catch {
+    return [];
+  }
+}
+
+/** Parse hex or rgb color string to { r, g, b } in [0, 255] */
+function parseRgbColor(color: string): { r: number; g: number; b: number } | null {
+  const trimmed = color.trim();
+  if (trimmed.startsWith("#")) {
+    const hex = trimmed.slice(1);
+    if (hex.length === 3) {
+      return {
+        r: parseInt(hex[0] + hex[0], 16),
+        g: parseInt(hex[1] + hex[1], 16),
+        b: parseInt(hex[2] + hex[2], 16),
+      };
+    }
+    if (hex.length >= 6) {
+      return {
+        r: parseInt(hex.slice(0, 2), 16),
+        g: parseInt(hex.slice(2, 4), 16),
+        b: parseInt(hex.slice(4, 6), 16),
+      };
+    }
+  }
+  const rgbMatch = trimmed.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (rgbMatch) {
+    return {
+      r: Math.max(0, Math.min(255, Number(rgbMatch[1]))),
+      g: Math.max(0, Math.min(255, Number(rgbMatch[2]))),
+      b: Math.max(0, Math.min(255, Number(rgbMatch[3]))),
+    };
+  }
+  return null;
+}
+
+/** Compute WCAG relative luminance: 0 (black) to 1 (white). */
+function getRelativeLuminance(r: number, g: number, b: number): number {
+  const [rs, gs, bs] = [r / 255, g / 255, b / 255].map((c) =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4),
+  );
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+}
+
+/** Compute contrast ratio between two colors (1 to 21). */
+function getContrastRatio(
+  fg: { r: number; g: number; b: number },
+  bg: { r: number; g: number; b: number },
+): number {
+  const l1 = getRelativeLuminance(fg.r, fg.g, fg.b);
+  const l2 = getRelativeLuminance(bg.r, bg.g, bg.b);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** Advisory only: never changes the author's palette. Unknown CSS colors are skipped. */
+export function themeColorContrast(foreground: string, background: string): number | null {
+  const fg = parseRgbColor(foreground);
+  const bg = parseRgbColor(background);
+  return fg && bg ? getContrastRatio(fg, bg) : null;
+}
+
+/** Mix two rgb colors with a weight for c1 (0..1). */
+function mixColors(
+  c1: { r: number; g: number; b: number },
+  c2: { r: number; g: number; b: number },
+  weight: number,
+): string {
+  const r = Math.round(c1.r * weight + c2.r * (1 - weight));
+  const g = Math.round(c1.g * weight + c2.g * (1 - weight));
+  const b = Math.round(c1.b * weight + c2.b * (1 - weight));
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
+/** Harmonize custom theme tokens with contrast protection and full-UI coverage. */
+export function harmonizeCustomTheme(theme: CustomThemeConfig): Record<string, string> {
+  const isDark = theme.mode === "dark";
+  const tokens: Record<string, string> = { ...theme.tokens };
+
+  // 1. Resolve base background
+  const bgRaw = tokens["--peek-bg"] || (isDark ? "#141414" : "#f8f8f8");
+  tokens["--peek-bg"] = bgRaw;
+  const bgRgb =
+    parseRgbColor(bgRaw) || (isDark ? { r: 20, g: 20, b: 20 } : { r: 248, g: 248, b: 248 });
+
+  // 2. Resolve surfaces & sidebar
+  if (!tokens["--peek-sidebar"]) {
+    tokens["--peek-sidebar"] = isDark
+      ? mixColors(bgRgb, { r: 0, g: 0, b: 0 }, 0.85)
+      : mixColors(bgRgb, { r: 235, g: 235, b: 235 }, 0.9);
+  }
+  if (!tokens["--peek-surface"]) {
+    tokens["--peek-surface"] = isDark
+      ? mixColors(bgRgb, { r: 255, g: 255, b: 255 }, 0.88)
+      : "#ffffff";
+  }
+
+  const surfaceRgb = parseRgbColor(tokens["--peek-surface"]) || bgRgb;
+
+  // 3. Resolve list and composer fill (prevents stark white patches in dark mode)
+  if (!tokens["--peek-list-bg"]) {
+    tokens["--peek-list-bg"] = isDark ? tokens["--peek-surface"] : "#ffffff";
+  }
+  if (!tokens["--peek-composer-fill"]) {
+    tokens["--peek-composer-fill"] = isDark ? tokens["--peek-surface"] : tokens["--peek-list-bg"];
+  }
+  if (!tokens["--peek-interaction-fill"]) {
+    tokens["--peek-interaction-fill"] = tokens["--peek-composer-fill"];
+  }
+  if (!tokens["--peek-input-bg"]) {
+    tokens["--peek-input-bg"] = isDark ? tokens["--peek-surface"] : "#ffffff";
+  }
+  if (!tokens["--peek-user-bubble-bg"]) {
+    tokens["--peek-user-bubble-bg"] = isDark
+      ? mixColors(surfaceRgb, { r: 255, g: 255, b: 255 }, 0.85)
+      : "#ececec";
+  }
+
+  // 4. Fill missing colors only. Explicit author choices must survive unchanged.
+  const textRaw = tokens["--peek-text"];
+  if (!textRaw) {
+    tokens["--peek-text"] = isDark ? "#f1f5f9" : "#0f172a";
+  }
+
+  const mutedRaw = tokens["--peek-muted"];
+  if (!mutedRaw) {
+    tokens["--peek-muted"] = isDark ? "#94a3b8" : "#64748b";
+  }
+  if (!tokens["--peek-faint"]) {
+    tokens["--peek-faint"] = isDark ? "#64748b" : "#94a3b8";
+  }
+  if (!tokens["--peek-placeholder"]) {
+    tokens["--peek-placeholder"] = tokens["--peek-faint"];
+  }
+  if (!tokens["--peek-danger"]) {
+    tokens["--peek-danger"] = isDark ? "#e85d5d" : "#c42b1c";
+  }
+  if (!tokens["--peek-warning"]) {
+    tokens["--peek-warning"] = isDark ? "#d4a017" : "#8a6500";
+  }
+  if (!tokens["--peek-success"]) {
+    tokens["--peek-success"] = isDark ? "#5dba83" : "#18794e";
+  }
+  if (!tokens["--peek-info"]) {
+    tokens["--peek-info"] = isDark ? "#6cb6ff" : "#006ab1";
+  }
+  if (!tokens["--peek-shadow"]) {
+    tokens["--peek-shadow"] = isDark ? "rgb(0 0 0 / 48%)" : "rgb(0 0 0 / 18%)";
+  }
+
+  // User bubble text contrast
+  const bubbleBgRgb = parseRgbColor(tokens["--peek-user-bubble-bg"]) || surfaceRgb;
+  const bubbleLuminance = getRelativeLuminance(bubbleBgRgb.r, bubbleBgRgb.g, bubbleBgRgb.b);
+  if (!tokens["--peek-user-bubble-text"]) {
+    tokens["--peek-user-bubble-text"] = bubbleLuminance < 0.45 ? "#f8fafc" : "#0f172a";
+  }
+  if (!tokens["--peek-composer-text"]) {
+    const composerRgb = parseRgbColor(tokens["--peek-composer-fill"]) || surfaceRgb;
+    const luminance = getRelativeLuminance(composerRgb.r, composerRgb.g, composerRgb.b);
+    tokens["--peek-composer-text"] = luminance < 0.45 ? "#f8fafc" : "#0f172a";
+  }
+
+  // 5. Accent & Action Buttons
+  const accentRaw = tokens["--peek-accent"] || (isDark ? "#38bdf8" : "#2563eb");
+  tokens["--peek-accent"] = accentRaw;
+  const accentRgb =
+    parseRgbColor(accentRaw) || (isDark ? { r: 56, g: 189, b: 248 } : { r: 37, g: 99, b: 235 });
+  const accentLuminance = getRelativeLuminance(accentRgb.r, accentRgb.g, accentRgb.b);
+
+  if (!tokens["--peek-accent-fg"]) {
+    tokens["--peek-accent-fg"] = accentLuminance > 0.45 ? "#09090b" : "#ffffff";
+  }
+  tokens["--peek-send-active-bg"] ||= tokens["--peek-accent"];
+  tokens["--peek-send-active-fg"] ||= tokens["--peek-accent-fg"];
+  tokens["--peek-primary-foreground"] ||= tokens["--peek-accent-fg"];
+
+  if (!tokens["--peek-send-bg"]) {
+    tokens["--peek-send-bg"] = isDark
+      ? mixColors(surfaceRgb, { r: 255, g: 255, b: 255 }, 0.88)
+      : "#e5e5e5";
+  }
+  if (!tokens["--peek-send-fg"]) {
+    tokens["--peek-send-fg"] = isDark ? "#d1d5db" : "#4b5563";
+  }
+  if (!tokens["--peek-row-active"]) {
+    tokens["--peek-row-active"] = isDark
+      ? mixColors(surfaceRgb, accentRgb, 0.82)
+      : mixColors({ r: 255, g: 255, b: 255 }, accentRgb, 0.88);
+  }
+
+  // 6. Icon Customization Tokens
+  if (!tokens["--peek-icon"]) {
+    tokens["--peek-icon"] = isDark ? "#e2e8f0" : "#334155";
+  }
+  if (!tokens["--peek-icon-muted"]) {
+    tokens["--peek-icon-muted"] = tokens["--peek-muted"];
+  }
+  if (!tokens["--peek-icon-accent"]) {
+    tokens["--peek-icon-accent"] = tokens["--peek-accent"];
+  }
+  if (!tokens["--peek-icon-glow"]) {
+    tokens["--peek-icon-glow"] = "none";
+  }
+
+  // 7. Borders & Composer
+  if (!tokens["--peek-border"]) {
+    tokens["--peek-border"] = isDark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.14)";
+  }
+  if (!tokens["--peek-strong-border"]) {
+    tokens["--peek-strong-border"] = isDark ? "rgba(255, 255, 255, 0.18)" : "rgba(0, 0, 0, 0.22)";
+  }
+  if (!tokens["--peek-user-bubble-border"]) {
+    tokens["--peek-user-bubble-border"] = tokens["--peek-border"];
+  }
+  if (!tokens["--peek-user-bubble-shadow"]) {
+    tokens["--peek-user-bubble-shadow"] = "none";
+  }
+  const hasAssistantCard =
+    (tokens["--peek-assistant-bg"] && tokens["--peek-assistant-bg"] !== "transparent") ||
+    (tokens["--peek-assistant-border"] && tokens["--peek-assistant-border"] !== "transparent") ||
+    (tokens["--peek-assistant-padding"] &&
+      tokens["--peek-assistant-padding"] !== "0" &&
+      tokens["--peek-assistant-padding"] !== "0px");
+  if (hasAssistantCard && !tokens["--chat-reply-inset"]) {
+    tokens["--chat-reply-inset"] = "0px";
+  }
+  if (!tokens["--peek-composer-border"]) {
+    tokens["--peek-composer-border"] = isDark
+      ? "color-mix(in srgb, var(--peek-text) 12%, transparent)"
+      : "color-mix(in srgb, var(--peek-text) 9%, transparent)";
+  }
+  if (!tokens["--peek-composer-border-focus"]) {
+    tokens["--peek-composer-border-focus"] = tokens["--peek-composer-border"];
+  }
+  if (!tokens["--peek-composer-shadow"]) {
+    tokens["--peek-composer-shadow"] = "none";
+  }
+  if (!tokens["--peek-composer-shadow-focus"]) {
+    tokens["--peek-composer-shadow-focus"] = "none";
+  }
+  if (!tokens["--workbench-glass-fill"]) {
+    tokens["--workbench-glass-fill"] =
+      `color-mix(in srgb, ${tokens["--peek-sidebar"]} var(--workbench-glass-opacity, 82%), transparent)`;
+  }
+  if (!tokens["--workbench-glass-fill-covering"]) {
+    tokens["--workbench-glass-fill-covering"] =
+      `color-mix(in srgb, ${tokens["--peek-sidebar"]} 98%, transparent)`;
+  }
+
+  return tokens;
+}
+
+const CUSTOM_PROP = /^--[a-zA-Z0-9-]+$/;
+
+function cssAttributeValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** Keep one bad token from closing the rule and hiding every theme after it. */
+function cssDeclarationValue(value: string): string {
+  const first = value.split(";")[0] ?? "";
+  const printable = Array.from(first, (ch) => (ch.charCodeAt(0) < 0x20 ? " " : ch)).join("");
+  return printable
+    .replace(/[{}]|<\/|\*\//g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function customThemeDeclarations(theme: CustomThemeConfig): string[] {
+  const harmonized = harmonizeCustomTheme(theme);
+  const declarations = Object.entries(harmonized).flatMap(([prop, val]) => {
+    if (!CUSTOM_PROP.test(prop)) return [];
+    const safe = cssDeclarationValue(String(val));
+    return safe ? [`  ${prop}: ${safe};`] : [];
+  });
+  if (theme.background?.image && !isLocalImagePath(theme.background.image)) {
+    const resolvedUrl = cssDeclarationValue(resolveChatImageSrc(theme.background.image));
+    if (resolvedUrl) {
+      declarations.push(`  --theme-bg-image: url(${JSON.stringify(resolvedUrl)});`);
+    }
+  }
+  if (typeof theme.background?.opacity === "number" && Number.isFinite(theme.background.opacity)) {
+    declarations.push(`  --theme-bg-opacity: ${theme.background.opacity};`);
+  }
+  if (typeof theme.background?.blur === "number" && Number.isFinite(theme.background.blur)) {
+    declarations.push(`  --theme-bg-blur: ${theme.background.blur}px;`);
+  }
+  if (theme.background?.fit) {
+    const fit = cssDeclarationValue(theme.background.fit);
+    if (fit) declarations.push(`  --theme-bg-fit: ${fit};`);
+  }
+  return declarations;
+}
+
+export function ensureCustomThemeStyleSheet(themes: CustomThemeConfig[] = []): void {
+  if (typeof document === "undefined") return;
+  let styleEl = document.getElementById(CUSTOM_STYLE_TAG_ID) as HTMLStyleElement | null;
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = CUSTOM_STYLE_TAG_ID;
+    document.head.appendChild(styleEl);
+  }
+
+  if (themes.length === 0) {
+    styleEl.textContent = "";
+    return;
+  }
+
+  // `[data-theme-mode]` beats the builtin light/dark palette, which uses the
+  // same specificity as `html[data-theme="…"]` and otherwise covers custom themes.
+  styleEl.textContent = themes
+    .map((theme) => {
+      const declarations = customThemeDeclarations(theme);
+      if (!theme.id || declarations.length === 0) return "";
+      const selector = `html[data-theme="${cssAttributeValue(theme.id)}"][data-theme-mode]`;
+      return `${selector} {\n${declarations.join("\n")}\n}`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function applyDocumentColorScheme(colorScheme: ColorScheme, glass: boolean) {
+  const root = rootElement();
+  const body = document.body;
+  const scheme = documentColorScheme(colorScheme);
+
+  if (root.classList.contains("peek-window") || glass) {
+    root.style.colorScheme = "normal";
+    root.style.background = "transparent";
+    if (body) {
+      body.style.colorScheme = scheme;
+      body.style.background = "transparent";
+    }
+    return;
+  }
+
+  root.style.colorScheme = scheme;
+  root.style.removeProperty("background");
+  if (body) {
+    body.style.removeProperty("color-scheme");
+    body.style.removeProperty("background");
+  }
+}
+
+function colorSchemeInlineMatches(colorScheme: ColorScheme, glass: boolean): boolean {
+  const root = rootElement();
+  const scheme = documentColorScheme(colorScheme);
+  if (root.classList.contains("peek-window") || glass) {
+    return root.style.colorScheme === "normal" && document.body?.style.colorScheme === scheme;
+  }
+  return root.style.colorScheme === scheme && !document.body?.style.colorScheme;
+}
+
+function scheduleColorSchemeRebind(colorScheme: ColorScheme, glass: boolean) {
+  const rebind = () => applyDocumentColorScheme(colorScheme, glass);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      rebind();
+      void rootElement().offsetHeight;
+    });
+  });
+  window.setTimeout(rebind, 50);
+}
+
+/** Read resolved CSS custom property from the document root. */
+export function readThemeToken(name: string, fallback = ""): string {
+  const value = getComputedStyle(rootElement()).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+export function readThemeState(): ThemeState {
+  const root = rootElement();
+  const themeId = normalizeColorScheme(root.dataset.theme);
+  const customThemes = readCachedCustomThemes();
+  return {
+    themeId,
+    language: (root.lang as AppLanguage) || "zh-CN",
+    chromeFrostedGlass: root.classList.contains("chrome-frosted-glass"),
+    isDark: isDarkTheme(themeId, customThemes),
+  };
+}
+
+function dispatchThemeChange(detail: ThemeChangeDetail) {
+  window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail }));
+}
+
+/** Apply theme by setting html[data-theme]. Does not use a `.dark` class. */
+export function applyThemeAppearance(input: ThemeAppearanceInput): ThemeState {
+  const explicitThemes = input.customThemes;
+  let customThemes: CustomThemeConfig[];
+  if (explicitThemes) {
+    customThemes = explicitThemes;
+    cacheCustomThemes(explicitThemes);
+    ensureCustomThemeStyleSheet(explicitThemes);
+  } else {
+    customThemes = readCachedCustomThemes();
+    const sheet = document.getElementById(CUSTOM_STYLE_TAG_ID) as HTMLStyleElement | null;
+    // A boot paint may omit the theme list. Do not wipe a sheet that settings
+    // already installed when that cache is missing or still holds wallpaper bytes.
+    if (!sheet?.textContent && customThemes.length > 0) {
+      ensureCustomThemeStyleSheet(customThemes);
+    }
+  }
+
+  const themeId = normalizeColorScheme(input.colorScheme);
+  const language = input.language;
+  const glass =
+    input.chromeFrostedGlass ?? rootElement().classList.contains("chrome-frosted-glass");
+
+  cacheColorScheme(themeId);
+
+  const root = rootElement();
+  const unchanged =
+    root.dataset.theme === themeId &&
+    root.lang === language &&
+    root.classList.contains("chrome-frosted-glass") === glass &&
+    colorSchemeInlineMatches(themeId, glass);
+
+  applyDocumentColorScheme(themeId, glass);
+
+  const isDark = isDarkTheme(themeId, customThemes);
+
+  if (!unchanged) {
+    root.lang = language;
+    root.dataset.theme = themeId;
+    root.dataset.themeMode = isDark ? "dark" : "light";
+    root.classList.remove("dark");
+  }
+
+  applyDocumentColorScheme(themeId, glass);
+  scheduleColorSchemeRebind(themeId, glass);
+  void applyChromeFrostedGlass(glass);
+
+  const state: ThemeState = {
+    themeId,
+    language,
+    chromeFrostedGlass: glass,
+    isDark,
+  };
+  dispatchThemeChange(state);
+  return state;
+}
+
+/** Boot hint before settings IPC returns (matches index.html splash). */
+export function bootstrapThemeAppearance(language: AppLanguage = "zh-CN"): ThemeAppearanceInput {
+  return {
+    colorScheme: readCachedColorScheme(),
+    language,
+    chromeFrostedGlass: false,
+  };
+}
+
+export function isWorkbenchWindow(): boolean {
+  try {
+    return getCurrentWebviewWindow().label === "workbench";
+  } catch {
+    return false;
+  }
+}

@@ -1,0 +1,355 @@
+import { defineStore } from "pinia";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+
+import { DEFAULT_CHAT_MODEL } from "@/constants/chat";
+import { getAppSettings, setAppSettings } from "@/services/ipc";
+import { applyOpacity, applyChromeFrostedGlass } from "@/services/overlay/appearance";
+import {
+  readCachedComposerSettings,
+  writeCachedComposerSettings,
+} from "@/services/settings/startupCache";
+import {
+  normalizeChatMode,
+  normalizeReasoningEffort,
+  type AppLanguage,
+  type AppSettings,
+  type AppSettingsPatch,
+  type ColorScheme,
+  type CustomThemeConfig,
+  type ThemeBackgroundConfig,
+} from "@/types/setting";
+import { normalizeColorScheme, readCachedColorScheme } from "@/services/theme/catalog";
+import { applyThemeAppearance } from "@/services/theme";
+import { applyUiFonts } from "@/services/theme/fonts";
+
+const LEGACY_STORAGE_KEY = "peek.settings";
+let settingsUpdateSequence = 0;
+
+const defaultSettings: AppSettings = {
+  colorScheme: "light",
+  language: "zh-CN",
+  deepseekApiKey: "",
+  deepseekModels: [],
+  memoryEnabled: true,
+  mem0ApiKey: "",
+  mem0UserId: "peek-user",
+  mem0BaseUrl: "https://api.mem0.ai/v1",
+  webSearchEnabled: false,
+  webSearchProvider: "serper",
+  serperApiKey: "",
+  tavilyApiKey: "",
+  toolApprovalMode: "ask",
+  chatMode: "agent",
+  lspEnabled: false,
+  lspServers: [],
+  mcpServers: [],
+  smitheryApiKey: "",
+  enabledBuiltinSkills: [],
+  opacity: 100,
+  chromeFrostedGlass: false,
+  chatModel: DEFAULT_CHAT_MODEL,
+  chatModelProvider: "",
+  multimodalModel: "gpt-4o",
+  multimodalModelProvider: "",
+  imageModel: "gpt-image-2",
+  imageModelProvider: "",
+  imageProviders: [],
+  imageStyleTemplates: [],
+  multimodalSplitAnalysis: true,
+  largeContextEnabled: true,
+  reasoningEffort: "disabled",
+  reasoningLanguage: "auto",
+  passToolReasoning: true,
+  continueThinkingAfterTools: true,
+  showReasoning: false,
+  agentWorkDisplay: "detailed",
+  multiModelCollaboration: false,
+  collaborationModels: [],
+  minimalCoding: false,
+  zoom: 100,
+  hardwareAccelerationEnabled: false,
+  primaryHotkey: "Alt",
+  primaryHotkeyEnabled: true,
+  secondaryHotkey: "Ctrl+Alt+Space",
+  secondaryHotkeyEnabled: true,
+  customProviders: [],
+  pixpinPinAiEnabled: true,
+  snipastePinAiEnabled: true,
+  onboardingCompleted: true,
+  customThemes: [],
+  customBackground: undefined,
+  fontCjk: "",
+  fontLatin: "",
+  fontMono: "",
+};
+
+/** Apply light/dark/custom theme via ThemeService (`html[data-theme]`). */
+export function applyTheme(
+  settings: Pick<AppSettings, "colorScheme" | "language" | "chromeFrostedGlass"> & {
+    customThemes?: CustomThemeConfig[];
+  },
+) {
+  applyThemeAppearance({
+    colorScheme: settings.colorScheme,
+    language: settings.language,
+    customThemes: settings.customThemes,
+    chromeFrostedGlass: settings.chromeFrostedGlass,
+  });
+}
+
+/** Theme to paint before settings finish loading (matches boot splash). */
+export function bootstrapThemeHint(language: AppLanguage = "zh-CN") {
+  return { colorScheme: readCachedColorScheme(), language };
+}
+
+export function applyZoom(zoom: number) {
+  let isWorkbench = false;
+  try {
+    isWorkbench = getCurrentWebviewWindow().label === "workbench";
+  } catch {
+    // Auxiliary windows fall through to document zoom.
+  }
+
+  const root = document.documentElement;
+  const normalized = Math.max(zoom, 1) / 100;
+  root.style.setProperty("--ui-zoom", String(normalized));
+  root.dataset.uiZoomed = normalized === 1 ? "false" : "true";
+
+  // Workbench uses transform:scale on `.workbench` (see Main.vue).
+  // Overlay/Settings keep document zoom paired with window resize.
+  if (isWorkbench) {
+    root.style.removeProperty("zoom");
+    root.dataset.zoomShell = "workbench";
+  } else {
+    root.style.zoom = String(normalized);
+    root.dataset.zoomShell = "window";
+  }
+}
+
+function normalizeOpacityValue(settings: AppSettings): number {
+  let opacityVal = settings.opacity;
+  if (opacityVal === undefined) {
+    const legacy = settings as AppSettings & { frostedGlass?: boolean };
+    if (legacy.frostedGlass !== undefined) {
+      opacityVal = legacy.frostedGlass ? 80 : 100;
+    }
+  }
+  return opacityVal ?? 100;
+}
+
+function normalizeZoomValue(settings: AppSettings): number {
+  let zoomVal = settings.zoom;
+  if (zoomVal !== undefined && zoomVal <= 2.0) {
+    zoomVal = Math.round(zoomVal * 100);
+  }
+  return zoomVal ?? 100;
+}
+
+const SECRET_SETTING_KEYS: ReadonlySet<keyof AppSettings> = new Set([
+  "deepseekApiKey",
+  "mem0ApiKey",
+  "serperApiKey",
+  "tavilyApiKey",
+  "smitheryApiKey",
+]);
+
+/** Keys needing normalization or legacy fallback instead of a plain `?? default` copy. */
+const SPECIAL_SETTING_KEYS: ReadonlySet<keyof AppSettings> = new Set([
+  "colorScheme",
+  "opacity",
+  "zoom",
+  "reasoningEffort",
+  "chatMode",
+  "agentWorkDisplay",
+  "onboardingCompleted",
+]);
+
+function applyCommonSettings(target: AppSettings, settings: AppSettings) {
+  for (const key of Object.keys(defaultSettings) as (keyof AppSettings)[]) {
+    if (SECRET_SETTING_KEYS.has(key) || SPECIAL_SETTING_KEYS.has(key)) continue;
+    const value = settings[key] ?? defaultSettings[key];
+    // IPC returns fresh collections even for scalar changes. Preserve equal
+    // collections so provider/catalog watchers do not restart.
+    if (typeof value === "object" && JSON.stringify(target[key]) === JSON.stringify(value))
+      continue;
+    (target as Record<keyof AppSettings, unknown>)[key] = value;
+  }
+
+  target.colorScheme = normalizeColorScheme(settings.colorScheme);
+  target.opacity = normalizeOpacityValue(settings);
+  target.zoom = normalizeZoomValue(settings);
+  target.reasoningEffort = normalizeReasoningEffort(settings.reasoningEffort);
+  target.chatMode = normalizeChatMode(settings.chatMode);
+  target.agentWorkDisplay = settings.agentWorkDisplay === "compact" ? "compact" : "detailed";
+  target.onboardingCompleted = settings.onboardingCompleted ?? true;
+}
+
+function applySecretSettings(target: AppSettings, settings: AppSettings) {
+  for (const key of SECRET_SETTING_KEYS) {
+    (target as Record<keyof AppSettings, unknown>)[key] = settings[key] ?? defaultSettings[key];
+  }
+}
+
+// Cache per store, including broadcasts: scalar composer changes must not repaint
+// the entire webview or reconfigure native window effects.
+const appearanceSignatures = new WeakMap<object, string[]>();
+function applyChangedAppearance(settings: AppSettings) {
+  const next = [
+    JSON.stringify([
+      settings.colorScheme,
+      settings.language,
+      settings.customThemes,
+      settings.chromeFrostedGlass,
+    ]),
+    JSON.stringify([settings.fontLatin, settings.fontCjk, settings.fontMono]),
+    String(settings.zoom),
+    String(settings.opacity),
+    String(settings.chromeFrostedGlass),
+  ];
+  const previous = appearanceSignatures.get(settings);
+  appearanceSignatures.set(settings, next);
+  if (previous?.[0] !== next[0]) applyTheme(settings);
+  if (previous?.[1] !== next[1]) applyUiFonts(settings);
+  if (previous?.[2] !== next[2]) applyZoom(settings.zoom);
+  if (previous?.[3] !== next[3]) void applyOpacity(settings.opacity);
+  if (previous?.[4] !== next[4]) void applyChromeFrostedGlass(settings.chromeFrostedGlass);
+}
+
+export const useSettingStore = defineStore("setting", {
+  // Boot cache supplies the saved thinking strength / model so the composer renders
+  // them on the first frame instead of the `defaultSettings` placeholders.
+  state: (): AppSettings => ({ ...defaultSettings, ...(readCachedComposerSettings() ?? {}) }),
+  actions: {
+    applyPublicSettings(settings: AppSettings) {
+      applyCommonSettings(this, settings);
+      writeCachedComposerSettings(this);
+      applyChangedAppearance(this);
+    },
+    applySettingsBroadcast(settings: AppSettings) {
+      // A scalar composer update also broadcasts a complete settings snapshot.
+      // Do not discard it: another window may have changed providers or keys
+      // while that update was in flight.
+      applyCommonSettings(this, settings);
+      applySecretSettings(this, settings);
+      writeCachedComposerSettings(this);
+      applyChangedAppearance(this);
+    },
+    applySettings(settings: AppSettings) {
+      applyCommonSettings(this, settings);
+      writeCachedComposerSettings(this);
+      applySecretSettings(this, settings);
+      applyChangedAppearance(this);
+    },
+    async load() {
+      try {
+        const settings = await getAppSettings();
+        this.applySettings(settings);
+      } catch (error) {
+        console.error("get_app_settings failed:", error);
+        // Keep current in-memory values on transient IPC failures (common while
+        // `tauri:dev` rebuilds). Never fall back to defaults that reopen onboarding.
+        if (!this.$state.chatModel && !this.$state.deepseekApiKey) {
+          this.applyPublicSettings(defaultSettings);
+        }
+      }
+
+      const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (!legacy) {
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(legacy) as AppSettingsPatch;
+        const settings = await setAppSettings(parsed);
+        this.applySettings(settings);
+      } catch (error) {
+        console.error("legacy settings migration failed:", error);
+      } finally {
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      }
+    },
+    async update(partial: AppSettingsPatch) {
+      const sequence = ++settingsUpdateSequence;
+      // Permission chips are changed while the composer is focused. Reapplying
+      // theme, fonts, zoom and native opacity for this scalar patch blocks paint.
+      if (
+        Object.keys(partial).length === 1 &&
+        (partial.toolApprovalMode !== undefined || partial.reasoningEffort !== undefined)
+      ) {
+        const previousMode = this.toolApprovalMode;
+        const previousEffort = this.reasoningEffort;
+        if (partial.toolApprovalMode !== undefined)
+          this.toolApprovalMode = partial.toolApprovalMode;
+        if (partial.reasoningEffort !== undefined) this.reasoningEffort = partial.reasoningEffort;
+        try {
+          const settings = await setAppSettings(partial);
+          if (sequence === settingsUpdateSequence) {
+            if (partial.toolApprovalMode !== undefined)
+              this.toolApprovalMode = settings.toolApprovalMode;
+            if (partial.reasoningEffort !== undefined)
+              this.reasoningEffort = normalizeReasoningEffort(settings.reasoningEffort);
+          }
+        } catch (error) {
+          if (sequence === settingsUpdateSequence) {
+            if (partial.toolApprovalMode !== undefined) this.toolApprovalMode = previousMode;
+            if (partial.reasoningEffort !== undefined) this.reasoningEffort = previousEffort;
+          }
+          throw error;
+        }
+        return;
+      }
+      const previous = { ...this.$state } as AppSettings;
+      const optimistic = { ...previous, ...partial } as AppSettings;
+      this.applySettings(optimistic);
+
+      try {
+        const settings = await setAppSettings(partial);
+        if (sequence === settingsUpdateSequence) {
+          this.applySettings(settings);
+        }
+      } catch (error) {
+        if (sequence === settingsUpdateSequence) {
+          this.applySettings(previous);
+        }
+        throw error;
+      }
+    },
+    async saveCustomTheme(theme: CustomThemeConfig) {
+      const existingIndex = this.customThemes.findIndex((t) => t.id === theme.id);
+      const nextThemes = [...this.customThemes];
+      if (existingIndex >= 0) {
+        nextThemes[existingIndex] = theme;
+      } else {
+        nextThemes.push(theme);
+      }
+      await this.update({
+        customThemes: nextThemes,
+        colorScheme: theme.id,
+      });
+    },
+    async deleteCustomTheme(id: string) {
+      const nextThemes = this.customThemes.filter((t) => t.id !== id);
+      const nextScheme = this.colorScheme === id ? "dark" : this.colorScheme;
+      await this.update({
+        customThemes: nextThemes,
+        colorScheme: nextScheme,
+      });
+    },
+    async saveThemeBackground(themeId: string, background: ThemeBackgroundConfig | null) {
+      const existingIndex = this.customThemes.findIndex((t) => t.id === themeId);
+      if (existingIndex >= 0) {
+        const nextThemes = [...this.customThemes];
+        nextThemes[existingIndex] = {
+          ...nextThemes[existingIndex],
+          background: background ?? undefined,
+          updatedAt: Date.now(),
+        };
+        await this.update({ customThemes: nextThemes });
+      } else {
+        await this.update({ customBackground: background });
+      }
+    },
+  },
+});
+
+export type { AppLanguage, AppSettings, AppSettingsPatch, ColorScheme };

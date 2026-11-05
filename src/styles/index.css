@@ -1,0 +1,382 @@
+@import "./fonts.css";
+@import "./scrollbars.css";
+@import "./motion.css";
+@import "./settings-page.css";
+
+@import "tailwindcss";
+@import "../services/theme/themes.css";
+@import "../services/theme/syntax.css";
+@import "tw-animate-css";
+@import "shadcn-vue/tailwind.css";
+
+@custom-variant dark (&:is([data-theme="dark"] *));
+
+html,
+body,
+#app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+html {
+  --ui-zoom: 1;
+}
+
+#app {
+  position: relative;
+}
+
+html.peek-window,
+html.peek-window body,
+html.peek-window #app,
+html.peek-window #app > * {
+  background: transparent !important;
+  color: var(--peek-text);
+}
+
+html.peek-window.frosted-glass .peek-surface.glass {
+  backdrop-filter: blur(20px) saturate(1.15);
+  -webkit-backdrop-filter: blur(20px) saturate(1.15);
+}
+
+html.peek-window.frosted-glass .thread-panel.glass {
+  background: color-mix(in srgb, var(--peek-list-bg) calc(var(--peek-opacity) * 100%), transparent);
+}
+
+html.peek-window.frosted-glass .thread-panel.has-messages.glass {
+  background: color-mix(in srgb, var(--peek-list-bg) calc(var(--peek-opacity) * 100%), transparent);
+}
+
+html.peek-window.frosted-glass .composer-dock.glass {
+  background: color-mix(in srgb, var(--peek-surface) calc(var(--peek-opacity) * 100%), transparent);
+}
+
+html.chrome-frosted-glass {
+  color-scheme: normal !important;
+}
+
+html.chrome-frosted-glass,
+html.chrome-frosted-glass body,
+html.chrome-frosted-glass #app,
+html.chrome-frosted-glass #app > * {
+  background: transparent !important;
+  background-image: none !important;
+  background-color: rgba(0, 0, 0, 0) !important;
+}
+
+html.chrome-frosted-glass body,
+html.chrome-frosted-glass .workbench,
+html.chrome-frosted-glass .settings-workbench,
+.workspace-menu-floating,
+.session-menu-flyout,
+.app-tooltip-bubble,
+.confirm-dialog,
+[data-slot="select-content"],
+[data-slot="tooltip-content"] {
+  color-scheme: only light;
+}
+
+@theme inline {
+  --font-sans: var(--peek-font-sans);
+  --font-heading: var(--peek-font-sans);
+  --font-mono: var(--peek-font-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: var(--peek-radius-sm);
+  --radius-md: var(--peek-radius-md);
+  --radius-lg: var(--peek-radius-lg);
+  --radius-xl: var(--peek-radius-composer);
+}
+
+:root {
+  --radius: 0.625rem;
+  --chart-1: var(--peek-chart-1);
+  --chart-2: var(--peek-chart-2);
+  --chart-3: var(--peek-chart-3);
+  --chart-4: var(--peek-chart-4);
+  --chart-5: var(--peek-chart-5);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    outline-color: transparent;
+  }
+  body {
+    @apply bg-background text-foreground;
+    @apply font-sans;
+    font-family: var(--peek-font-sans);
+    font-size: var(--peek-font-md, 14px);
+    font-weight: 500;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  html.peek-window .overlay-shell,
+  html.peek-window .chat-input-shell,
+  html.peek-window .input-bar {
+    border-color: transparent !important;
+    outline-color: transparent !important;
+    --tw-ring-color: transparent !important;
+    --tw-ring-shadow: 0 0 #0000 !important;
+    --tw-inset-ring-color: transparent !important;
+    --tw-inset-ring-shadow: 0 0 #0000 !important;
+    --tw-ring-offset-color: transparent !important;
+    --tw-ring-offset-shadow: 0 0 #0000 !important;
+  }
+  html.peek-window body {
+    background: transparent;
+    color: var(--peek-text);
+  }
+}
+
+html.peek-window #app,
+html.peek-window #app > *,
+html.peek-window .overlay-shell,
+html.peek-window .chat-input-shell {
+  border: none !important;
+  outline: none !important;
+}
+
+.setting-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--border);
+  height: 6px;
+  border-radius: 9999px;
+  outline: none;
+  transition: background 0.15s ease;
+}
+
+.setting-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--background);
+  box-shadow: 0 1px 3px var(--peek-shadow);
+  cursor: pointer;
+  transition:
+    transform 0.1s ease,
+    background-color 0.1s ease;
+}
+
+.setting-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.setting-slider::-webkit-slider-thumb:active {
+  transform: scale(0.9);
+}
+
+.setting-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--background);
+  box-shadow: 0 1px 3px var(--peek-shadow);
+  cursor: pointer;
+  transition:
+    transform 0.1s ease,
+    background-color 0.1s ease;
+}
+
+.setting-slider::-moz-range-thumb:hover {
+  transform: scale(1.2);
+}
+
+.setting-slider::-moz-range-thumb:active {
+  transform: scale(0.9);
+}
+/* Shared card-style tabs used by Diff files and child Agent views. */
+.peek-card-tabs {
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--peek-strong-border, var(--peek-border));
+  background: color-mix(in srgb, var(--peek-text) 1.5%, transparent);
+  scrollbar-width: none;
+}
+
+.peek-card-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.peek-card-tab {
+  position: relative;
+  box-sizing: border-box;
+  height: var(--peek-control-row, 30px);
+  display: flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--peek-text) 8%, transparent);
+  border-radius: var(--peek-radius-sm, 6px);
+  background: color-mix(in srgb, var(--peek-surface) 82%, transparent);
+  color: var(--peek-muted);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.peek-card-tab:hover {
+  border-color: color-mix(in srgb, var(--peek-text) 16%, transparent);
+  background: color-mix(in srgb, var(--peek-text) 6%, var(--peek-surface));
+  color: var(--peek-text);
+}
+
+.peek-card-tab.active {
+  border-color: color-mix(
+    in srgb,
+    var(--peek-accent) 55%,
+    var(--peek-strong-border, var(--peek-border))
+  );
+  background: color-mix(in srgb, var(--peek-accent) 10%, var(--peek-surface));
+  color: var(--peek-active-fg, var(--peek-text));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--peek-accent) 8%, transparent);
+}
+
+.peek-card-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--peek-focus-ring);
+}
+
+.peek-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: var(--peek-control-icon, 28px);
+  height: var(--peek-control-icon, 28px);
+  padding: 0;
+  border: 0;
+  border-radius: var(--peek-radius-sm, 6px);
+  background: transparent;
+  color: var(--peek-muted);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast, 110ms) var(--motion-ease-out, ease),
+    color var(--motion-fast, 110ms) var(--motion-ease-out, ease),
+    transform var(--motion-instant, 80ms) var(--motion-ease-out, ease);
+}
+
+.peek-icon-btn:hover,
+.peek-icon-btn.active {
+  color: var(--peek-text);
+  background: var(--peek-hover-bg);
+}
+
+.peek-icon-btn:active:not(:disabled) {
+  background: var(--peek-press-bg);
+  transform: scale(0.96);
+}
+
+.peek-icon-btn.active {
+  color: var(--peek-accent);
+}
+
+.peek-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--peek-focus-ring);
+}
+
+.peek-icon-btn:disabled,
+.peek-icon-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.peek-row {
+  min-width: 0;
+  height: var(--peek-control-row, 30px);
+  display: flex;
+  align-items: center;
+  border-radius: var(--peek-radius-sm, 6px);
+  background: transparent;
+  color: var(--peek-text);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast, 110ms) var(--motion-ease-out, ease),
+    color var(--motion-fast, 110ms) var(--motion-ease-out, ease);
+}
+
+.peek-row:hover {
+  background: var(--peek-row-hover);
+}
+
+.peek-row:active {
+  background: var(--peek-press-bg);
+}
+
+.peek-row.active,
+.peek-row[aria-current="true"],
+.peek-row[data-active="true"] {
+  background: var(--peek-row-active);
+  font-weight: 550;
+}
+
+.peek-row:focus-visible {
+  outline: none;
+  box-shadow: var(--peek-focus-ring);
+}
+
+.peek-pane {
+  border: 1px solid color-mix(in srgb, var(--peek-border) 62%, transparent);
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: var(--peek-radius-lg, 12px) 0 0 0;
+  background: var(--peek-list-bg);
+  box-shadow: -2px 1px 8px color-mix(in srgb, var(--peek-shadow) 22%, transparent);
+}
+
+.peek-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--peek-control-icon, 28px);
+  padding: 0 10px;
+  border: 1px solid var(--peek-border);
+  border-radius: var(--peek-radius-sm, 6px);
+  background: color-mix(in srgb, var(--peek-surface) 88%, transparent);
+  color: var(--peek-text);
+  font-size: var(--peek-font-sm, 12px);
+  font-weight: 500;
+  line-height: 1;
+}

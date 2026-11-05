@@ -1,0 +1,519 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const PROTOCOL_VERSION: i32 = 1;
+pub const DEFAULT_PORT: u16 = 8787;
+
+/// Companion image-mode toolbar payload. `style_id` lets the desktop resolve a custom
+/// style template (prompt + example image) that only exists in desktop settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteImageGenOptions {
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub n: Option<u8>,
+    #[serde(default)]
+    pub style_prompt: Option<String>,
+    #[serde(default)]
+    pub style_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClientMessage {
+    #[serde(rename = "hello")]
+    Hello {
+        #[serde(rename = "protocolVersion", default = "default_protocol_version")]
+        protocol_version: i32,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        credential: String,
+        /// Optional phone label (`Build.MODEL` / user name); older clients omit it.
+        #[serde(rename = "deviceName", default)]
+        device_name: Option<String>,
+        /// Part of the wire contract; accepted but not consumed yet.
+        #[serde(rename = "appVersion", default)]
+        #[allow(dead_code)]
+        app_version: String,
+    },
+    #[serde(rename = "session.list")]
+    SessionList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    /// Full history, or a window of it. `detail: "light"` drops the per-turn execution
+    /// process (reasoning / work timeline / tool activities); `limit` + `beforeMessageId`
+    /// page backwards through older turns. All three are optional so older companions keep
+    /// sending the two-field frame they always sent.
+    #[serde(rename = "session.history")]
+    SessionHistory {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// `"light"` (final answer only) or `"full"`; absent means full.
+        #[serde(rename = "detail", default)]
+        detail: Option<String>,
+        /// Maximum messages to return, counting back from the end (or from the cursor).
+        #[serde(rename = "limit", default)]
+        limit: Option<usize>,
+        /// Paging cursor: return only messages older than this one.
+        #[serde(rename = "beforeMessageId", default)]
+        before_message_id: Option<String>,
+    },
+    /// Full detail for individual messages (`session.messageDetail`). The companion asks for
+    /// a turn's execution process only when the user expands it.
+    #[serde(rename = "session.messageDetail")]
+    SessionMessageDetail {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "messageIds", default)]
+        message_ids: Vec<String>,
+    },
+    /// Current UTF-8 file content for a successful recorded read activity.
+    #[serde(rename = "session.readCodePreview")]
+    SessionReadCodePreview {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "activityId")]
+        activity_id: String,
+    },
+    #[serde(rename = "session.delete")]
+    SessionDelete {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    /// Archive or restore a chat session (`archived` true/false).
+    #[serde(rename = "session.archive")]
+    SessionArchive {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        archived: bool,
+    },
+    /// Rename a chat session (desktop `set_chat_session_title`).
+    #[serde(rename = "session.rename")]
+    SessionRename {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        title: String,
+    },
+    /// List archived chat sessions (mirrors desktop `list_archived_chat_sessions`).
+    #[serde(rename = "session.listArchived")]
+    SessionListArchived {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    /// Archive or restore a workspace together with its sessions (desktop `set_workspace_archived`).
+    #[serde(rename = "workspace.archive")]
+    WorkspaceArchive {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        archived: bool,
+    },
+    /// Pin or unpin a workspace (desktop `set_workspace_pinned`).
+    #[serde(rename = "workspace.pin")]
+    WorkspacePin {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        pinned: bool,
+    },
+    /// Update workspace display name / description (desktop `update_workspace`).
+    #[serde(rename = "workspace.update")]
+    WorkspaceUpdate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// Git working-tree unified diff for a workspace (desktop `working_tree_diff`).
+    #[serde(rename = "workspace.workingTreeDiff")]
+    WorkspaceWorkingTreeDiff {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "workspaceId", default)]
+        workspace_id: Option<String>,
+    },
+    /// Archived workspaces (desktop `list_archived_workspaces`).
+    #[serde(rename = "workspace.listArchived")]
+    WorkspaceListArchived {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    /// Live desktop environment / IDE / Office context (desktop `get_environment_context`).
+    #[serde(rename = "context.environment")]
+    ContextEnvironment {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    /// Image-mode choices: current image model / provider, configured image providers'
+    /// models, and style templates (built-ins live in the clients).
+    #[serde(rename = "imageGen.options")]
+    ImageGenOptions {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    /// Switch the desktop's image model (Settings → Image) from the phone.
+    #[serde(rename = "imageGen.setModel")]
+    ImageGenSetModel {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        provider: String,
+        model: String,
+    },
+    /// Roll a session back to the checkpoint taken before user turn `turn`.
+    #[serde(rename = "session.rewind")]
+    SessionRewind {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        turn: usize,
+        /// `code` | `conversation` | `both` (default).
+        #[serde(default)]
+        restore: Option<String>,
+    },
+    #[serde(rename = "chat.send")]
+    ChatSend {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+        message: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: Option<String>,
+        #[serde(rename = "chatMode", default)]
+        chat_mode: Option<String>,
+        #[serde(rename = "toolApprovalMode", default)]
+        tool_approval_mode: Option<String>,
+        #[serde(rename = "chatModel", default)]
+        chat_model: Option<String>,
+        #[serde(rename = "chatModelProvider", default)]
+        chat_model_provider: Option<String>,
+        /// Image-mode toolbar choices (`size`, `quality`, `n`, `stylePrompt`, `styleId`);
+        /// ignored in other modes.
+        #[serde(rename = "imageGen", default)]
+        image_gen: Option<RemoteImageGenOptions>,
+    },
+    #[serde(rename = "session.compose.get")]
+    SessionComposeGet {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename = "session.compose.set")]
+    SessionComposeSet {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "chatMode", default)]
+        chat_mode: Option<String>,
+        #[serde(rename = "toolApprovalMode", default)]
+        tool_approval_mode: Option<String>,
+        #[serde(rename = "chatModel", default)]
+        chat_model: Option<String>,
+        #[serde(rename = "chatModelProvider", default)]
+        chat_model_provider: Option<String>,
+        #[serde(rename = "chatModelLabel", default)]
+        chat_model_label: Option<String>,
+        #[serde(rename = "reasoningEffort", default)]
+        reasoning_effort: Option<String>,
+    },
+    /// Read the mid-turn staged message queue for a session.
+    #[serde(rename = "session.staged.get")]
+    SessionStagedGet {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    /// Append a message to the staged queue (Companion / desktop while busy).
+    #[serde(rename = "session.staged.push")]
+    SessionStagedPush {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        message: String,
+    },
+    /// Remove one staged message by index.
+    #[serde(rename = "session.staged.remove")]
+    SessionStagedRemove {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        index: usize,
+    },
+    /// Stop the running turn and send this staged message as a new turn.
+    #[serde(rename = "session.staged.guide")]
+    SessionStagedGuide {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        index: usize,
+    },
+    /// Pop the front staged message for post-turn auto-send (atomic vs desktop).
+    #[serde(rename = "session.staged.pop")]
+    SessionStagedPop {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    /// Clear the staged queue for a session.
+    #[serde(rename = "session.staged.clear")]
+    SessionStagedClear {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename = "context.usage")]
+    ContextUsage {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId", default)]
+        session_id: Option<String>,
+        #[serde(rename = "draftMessage", default)]
+        draft_message: Option<String>,
+        #[serde(rename = "modelId", default)]
+        model_id: Option<String>,
+    },
+    #[serde(rename = "models.list")]
+    ModelsList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "plan.approve")]
+    PlanApprove {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename = "chat.cancel")]
+    ChatCancel {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+    },
+    #[serde(rename = "approval.respond")]
+    ApprovalRespond {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "approvalRequestId")]
+        approval_request_id: String,
+        decision: String,
+    },
+    #[serde(rename = "ask.respond")]
+    AskRespond {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "askRequestId")]
+        ask_request_id: String,
+        answer: String,
+    },
+    /// App-level keep-alive reply to server `ping` (proxies often drop WS pings).
+    #[serde(rename = "pong")]
+    Pong {
+        /// Echoed timestamp from the wire contract; nothing reads it.
+        #[allow(dead_code)]
+        ts: i64,
+    },
+    #[serde(rename = "workspace.snapshot")]
+    WorkspaceSnapshot {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+    },
+    #[serde(rename = "workspace.readFile")]
+    WorkspaceReadFile {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        path: String,
+        #[serde(rename = "maxBytes", default = "default_max_bytes")]
+        max_bytes: i32,
+        #[serde(rename = "sessionId", default)]
+        session_id: Option<String>,
+        #[serde(rename = "workspaceId", default)]
+        workspace_id: Option<String>,
+        /// "text" (default) returns UTF-8 content; "download" returns one base64 slice.
+        #[serde(default)]
+        mode: Option<String>,
+        /// Download-mode byte offset. Defaults to 0; each RPC returns one slice.
+        #[serde(default)]
+        offset: Option<u64>,
+        /// Requested slice length in bytes; server caps this at 512KB.
+        #[serde(default)]
+        length: Option<u64>,
+    },
+    #[serde(rename = "workspace.files")]
+    WorkspaceFiles {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId", default)]
+        session_id: Option<String>,
+        #[serde(rename = "workspaceId", default)]
+        workspace_id: Option<String>,
+    },
+    #[serde(rename = "skills.list")]
+    SkillsList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "mcp.list")]
+    McpList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "file.upload.begin")]
+    FileUploadBegin {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "sessionId", default)]
+        session_id: Option<String>,
+        #[serde(rename = "workspaceId", default)]
+        workspace_id: Option<String>,
+        #[serde(rename = "fileName")]
+        file_name: String,
+        size: u64,
+        #[serde(default)]
+        #[allow(dead_code)]
+        mime: Option<String>,
+    },
+    #[serde(rename = "file.upload.chunk")]
+    FileUploadChunk {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "uploadId")]
+        upload_id: String,
+        offset: u64,
+        #[serde(rename = "dataBase64")]
+        data_base64: String,
+    },
+    #[serde(rename = "file.upload.finish")]
+    FileUploadFinish {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "uploadId")]
+        upload_id: String,
+    },
+    #[serde(rename = "file.upload.abort")]
+    FileUploadAbort {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "uploadId")]
+        upload_id: String,
+    },
+    #[serde(rename = "file.download.begin")]
+    FileDownloadBegin {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        path: String,
+        #[serde(rename = "sessionId", default)]
+        session_id: Option<String>,
+        #[serde(rename = "workspaceId", default)]
+        workspace_id: Option<String>,
+    },
+}
+
+fn default_protocol_version() -> i32 {
+    PROTOCOL_VERSION
+}
+
+fn default_max_bytes() -> i32 {
+    200_000
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum ServerMessage {
+    #[serde(rename = "hello.ok")]
+    HelloOk {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: i32,
+        #[serde(rename = "serverName")]
+        server_name: String,
+        #[serde(rename = "serverVersion", skip_serializing_if = "Option::is_none")]
+        server_version: Option<String>,
+    },
+    #[serde(rename = "hello.error")]
+    HelloError { code: String, message: String },
+    #[serde(rename = "event")]
+    Event {
+        name: String,
+        data: serde_json::Map<String, Value>,
+    },
+    #[serde(rename = "rpc.result")]
+    RpcResult {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    #[serde(rename = "ping")]
+    Ping { ts: i64 },
+}
+
+impl ServerMessage {
+    pub fn hello_ok(version: Option<String>) -> Self {
+        Self::HelloOk {
+            protocol_version: PROTOCOL_VERSION,
+            server_name: "Acode".into(),
+            server_version: version,
+        }
+    }
+
+    pub fn hello_error(code: &str, message: impl Into<String>) -> Self {
+        Self::HelloError {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn rpc_ok(request_id: impl Into<String>, data: Value) -> Self {
+        Self::RpcResult {
+            request_id: request_id.into(),
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    pub fn rpc_err(request_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::RpcResult {
+            request_id: request_id.into(),
+            ok: false,
+            data: None,
+            error: Some(error.into()),
+        }
+    }
+}

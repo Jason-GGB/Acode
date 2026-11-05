@@ -1,0 +1,104 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Local pnpm config (node-linker=hoisted; machine-specific, never commit)
+.npmrc
+
+# Local OAuth credentials
+agy-oauth.local.json
+google-oauth.local.json
+client_secret.local.json
+src-tauri/agy-oauth.local.json
+src-tauri/google-oauth.local.json
+src-tauri/client_secret.local.json
+
+# Updater signing
+src-tauri/updater.pubkey
+*.key
+
+# Local release artifacts (upload latest.json to GitHub Releases)
+release/**
+!release/Acode_0.2.31_GITHUB_RELEASE.md
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Git worktrees
+.worktrees/
+/.delta/
+
+# Eval harness outputs
+eval/results/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Debug symbols and temporary artifacts
+*.pdb
+tmp_*
+.tmp_*
+
+# Workspace-local Acode runtime (uploads, index, tool-results, plans, docx)
+.acode/
+
+# Bundled sidecars (downloaded by scripts/fetch-rg.mjs / fetch-deno.mjs)
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+
+# Alternate Cargo target dirs (e.g. CARGO_TARGET_DIR=target-opencli-test)
+src-tauri/target-*/
+
+# Loose captures / test dumps next to Cargo.toml (icons live in src-tauri/icons/)
+src-tauri/*.png
+src-tauri/*.jpg
+src-tauri/*.jpeg
+src-tauri/*.webp
+src-tauri/*.txt
+
+# Generated plugin caches if they appear in source
+src-tauri/plugins/**/data/
+src-tauri/plugins/**/ui/.acode/
+src-tauri/plugins/**/node_modules/
+
+# Cursor local plans (keep .cursor/rules committed)
+.cursor/plans/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+
+
+# Office document libraries bundled before Tauri dev/build
+src-tauri/resources/office/
+
+# Root build and document QA outputs
+/target/
+
+# Generated legacy harness dependency snapshot
+/src-tauri/harness/vendor/
+
+# Local UI preview harnesses
+/*-preview.html
+/src/dev/*Preview.vue
+/src/dev/*-preview.ts

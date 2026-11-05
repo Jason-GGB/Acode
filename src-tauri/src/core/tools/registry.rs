@@ -1,0 +1,556 @@
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use serde_json::Value;
+
+use super::context::ToolContext;
+use super::error::ToolError;
+use super::Tool;
+
+fn normalize_tool_name(name: &str) -> &str {
+    let name = name.trim();
+    match name {
+        // File edits
+        "write_to_file" | "create_file" | "Write" | "write" => "write_file",
+        "replace_content" | "replace_file_content" | "edit_file" | "StrReplace" | "str_replace" => {
+            "replace_in_file"
+        }
+        "Read" | "read" => "read_file",
+        // Shell
+        "run_command" | "execute_command" | "execute_shell" | "exec_command" | "Shell"
+        | "shell" => "run_shell",
+        // Search
+        "Grep" | "grep" | "rg" => "search_files",
+        "Glob" | "glob" => "find_files",
+        "WebSearch" | "websearch" | "google_search" | "search_web" | "bing_search" => "web_search",
+        "WebFetch" | "fetch_page" | "read_url" | "browse_url" => "browser_read",
+        "generate_image" | "GenerateImage" | "dall_e" | "dalle" | "text2img" => "generate_image",
+        // Task / ask aliases
+        "todo_write" | "TodoWrite" | "todoWrite" | "update_task_list" => "update_tasks",
+        "AskQuestion" | "ask_question" | "AskUser" => "ask_user",
+        _ => name,
+    }
+}
+
+pub struct ToolRegistry {
+    tools: HashMap<String, Arc<dyn Tool>>,
+    dynamic: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// Cached model-facing schemas; invalidated on register/unregister.
+    schema_cache: RwLock<Option<Vec<Value>>>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+            dynamic: RwLock::new(HashMap::new()),
+            schema_cache: RwLock::new(None),
+        }
+    }
+
+    pub fn register(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+        self.invalidate_schema_cache();
+    }
+
+    pub fn register_dynamic(&self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        if self.tools.contains_key(&name) {
+            tracing::warn!("refusing to overlay builtin tool `{name}`");
+            return;
+        }
+        if let Ok(mut guard) = self.dynamic.write() {
+            guard.insert(name, tool);
+        }
+        self.invalidate_schema_cache();
+    }
+
+    pub fn unregister_dynamic_prefix(&self, prefix: &str) {
+        if let Ok(mut guard) = self.dynamic.write() {
+            guard.retain(|name, _| !name.starts_with(prefix));
+        }
+        self.invalidate_schema_cache();
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        // Exact contracts win over compatibility aliases (dsh owns read/write).
+        if let Some(tool) = self.tools.get(name.trim()) {
+            return Some(Arc::clone(tool));
+        }
+        let name = normalize_tool_name(name);
+        if let Some(tool) = self.tools.get(name) {
+            return Some(Arc::clone(tool));
+        }
+        if let Ok(guard) = self.dynamic.read() {
+            if let Some(tool) = guard.get(name) {
+                return Some(Arc::clone(tool));
+            }
+        }
+        None
+    }
+
+    pub fn schemas(&self) -> Vec<Value> {
+        if let Ok(guard) = self.schema_cache.read() {
+            if let Some(cached) = guard.as_ref() {
+                return cached.clone();
+            }
+        }
+        let built = self.build_schemas();
+        if let Ok(mut guard) = self.schema_cache.write() {
+            *guard = Some(built.clone());
+        }
+        built
+    }
+
+    /// Shared-pointer view of schemas for hot agent loops (cheap to clone).
+    pub fn schemas_arc(&self) -> Arc<[Value]> {
+        Arc::from(self.schemas())
+    }
+
+    fn build_schemas(&self) -> Vec<Value> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        if let Ok(guard) = self.dynamic.read() {
+            names.extend(guard.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+        names
+            .into_iter()
+            .filter_map(|name| self.get(&name))
+            .filter(|tool| tool.available())
+            .map(|tool| tool.schema())
+            .collect()
+    }
+
+    fn invalidate_schema_cache(&self) {
+        if let Ok(mut guard) = self.schema_cache.write() {
+            *guard = None;
+        }
+    }
+
+    pub fn execute(&self, ctx: &ToolContext, name: &str, args: Value) -> Result<String, ToolError> {
+        let tool = self.prepare_execution(ctx, name, &args)?;
+        tool.execute(ctx, args)
+    }
+
+    pub(crate) fn prepare_execution(
+        &self,
+        ctx: &ToolContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Arc<dyn Tool>, ToolError> {
+        ctx.ensure_not_cancelled()?;
+        let name = if self.tools.contains_key(name.trim()) {
+            name.trim()
+        } else {
+            normalize_tool_name(name)
+        };
+        if name.is_empty() {
+            return Err(ToolError::new(self.unknown_tool_message("")));
+        }
+        crate::core::rules::RuleEngine::authorize_tool(name, args)?;
+        let tool = self
+            .get(name)
+            .ok_or_else(|| ToolError::new(self.unknown_tool_message(name)))?;
+        crate::core::tools::plan_mode::shared_plan_mode_store().authorize(
+            ctx.root_session_id(),
+            tool.name(),
+            tool.read_only(),
+        )?;
+        let preview = tool.preview(ctx, args)?;
+        crate::core::tools::tool_approval::shared_tool_approval_store().authorize(
+            ctx,
+            tool.as_ref(),
+            args,
+            preview.clone(),
+        )?;
+        ctx.ensure_not_cancelled()?;
+        let current_preview = tool.preview(ctx, args)?;
+        if current_preview != preview {
+            return Err(ToolError::new(
+                "file changed after the edit preview was created; inspect the latest content and retry",
+            ));
+        }
+        if let Some(preview) = &current_preview {
+            crate::core::checkpoint::shared_checkpoint_store().snapshot_preview(
+                ctx.root_session_id(),
+                &ctx.workspace_root,
+                preview,
+            )?;
+        }
+        Ok(tool)
+    }
+
+    fn unknown_tool_message(&self, requested: &str) -> String {
+        format_unknown_tool_error(requested, &self.schema_tool_names())
+    }
+
+    /// Names currently exposed in model-facing schemas (unavailable tools omitted).
+    fn schema_tool_names(&self) -> Vec<String> {
+        self.schemas()
+            .iter()
+            .filter_map(schema_function_name)
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        if let Ok(guard) = self.dynamic.read() {
+            names.extend(guard.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn filter_read_only(&self) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
+        for name in self.names() {
+            if let Some(tool) = self.get(&name) {
+                if tool.read_only() {
+                    filtered.register(tool);
+                }
+            }
+        }
+        filtered
+    }
+
+    /// Ask / question-only mode: read-only tools plus interaction/orchestration
+    /// tools (`ask_user`, `update_tasks`) so the model can still clarify and
+    /// maintain a task list without writing files.
+    pub fn filter_for_ask_mode(&self) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
+        for name in self.names() {
+            if let Some(tool) = self.get(&name) {
+                if tool.read_only()
+                    || matches!(
+                        name.as_str(),
+                        "update_tasks"
+                            | "ask_user"
+                            | "ask_user_question"
+                            | "todo_write"
+                            | "manage_plugin"
+                    )
+                {
+                    filtered.register(tool);
+                }
+            }
+        }
+        filtered
+    }
+
+    /// Child agents receive execution tools but never delegation tools.
+    pub fn filter_for_subagent(&self, read_only: bool) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
+        for name in self.names() {
+            if name == "subagent" || crate::core::tools::agent::is_async_runtime_tool(&name) {
+                continue;
+            }
+            if name == "save_plan" || name == "request_plan_mode" || name == "exit_plan_mode" {
+                continue;
+            }
+            if let Some(tool) = self.get(&name) {
+                if !read_only || tool.read_only() {
+                    filtered.register(tool);
+                }
+            }
+        }
+        filtered
+    }
+
+    /// Image generation mode: only `generate_image` is exposed so every turn
+    /// can produce a picture without file/shell side effects.
+    pub fn filter_for_image_mode(&self) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
+        if let Some(tool) = self.get("generate_image") {
+            filtered.register(tool);
+        }
+        filtered
+    }
+
+    /// Tools exposed while plan mode is active: read-only tools plus the
+    /// planning / interaction tools plan mode explicitly allows.
+    pub fn filter_for_plan_mode(&self) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
+        for name in self.names() {
+            if let Some(tool) = self.get(&name) {
+                if tool.read_only()
+                    || matches!(
+                        name.as_str(),
+                        "save_plan"
+                            | "update_tasks"
+                            | "ask_user"
+                            | "complete_plan_step"
+                            | "todo_write"
+                            | "share_to_companion"
+                            | "share_preview_url"
+                            | "manage_plugin"
+                    )
+                {
+                    filtered.register(tool);
+                }
+            }
+        }
+        filtered
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn schema_function_name(schema: &Value) -> Option<&str> {
+    schema
+        .pointer("/function/name")
+        .and_then(Value::as_str)
+        .or_else(|| schema.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+fn format_unknown_tool_error(requested: &str, available: &[String]) -> String {
+    let catalog = if available.is_empty() {
+        "Available tools this turn: (none).".to_string()
+    } else {
+        format!(
+            "Available tools this turn: {}.",
+            available
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let requested = requested.trim();
+    if requested.is_empty() {
+        format!("malformed tool call: empty tool name. Do not invent names. {catalog}")
+    } else {
+        format!(
+            "unknown tool: {requested}. That name is not in this turn's schema — do not invent tools. {catalog}"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubTool {
+        name: &'static str,
+        read_only: bool,
+    }
+
+    impl Tool for StubTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn read_only(&self) -> bool {
+            self.read_only
+        }
+
+        fn execute(&self, _ctx: &ToolContext, _args: Value) -> Result<String, ToolError> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn subagent_registry_excludes_all_delegation_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "read_file",
+            read_only: true,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "write_file",
+            read_only: false,
+        }));
+        for name in [
+            "run_subagent",
+            "run_parallel_subagents",
+            "run_skill",
+            "explore_codebase",
+            "review_code",
+        ] {
+            registry.register(Arc::new(StubTool {
+                name,
+                read_only: true,
+            }));
+        }
+
+        let writable = registry.filter_for_subagent(false).names();
+        assert_eq!(writable, vec!["read_file", "write_file"]);
+
+        let read_only = registry.filter_for_subagent(true).names();
+        assert_eq!(read_only, vec!["read_file"]);
+    }
+
+    #[test]
+    fn filter_for_ask_mode_keeps_interaction_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "read_file",
+            read_only: true,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "write_file",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "ask_user",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "update_tasks",
+            read_only: false,
+        }));
+
+        let filtered = registry.filter_for_ask_mode();
+        let names = filtered.names();
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"ask_user".to_string()));
+        assert!(names.contains(&"update_tasks".to_string()));
+        assert!(!names.contains(&"write_file".to_string()));
+    }
+
+    #[test]
+    fn request_plan_mode_is_agent_only() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "request_plan_mode",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "read_file",
+            read_only: true,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "write_file",
+            read_only: false,
+        }));
+
+        let agent = registry.names();
+        assert!(agent.contains(&"request_plan_mode".to_string()));
+        assert!(!registry
+            .filter_for_plan_mode()
+            .names()
+            .contains(&"request_plan_mode".to_string()));
+        assert!(!registry
+            .filter_for_ask_mode()
+            .names()
+            .contains(&"request_plan_mode".to_string()));
+        assert!(!registry
+            .filter_for_subagent(false)
+            .names()
+            .contains(&"request_plan_mode".to_string()));
+    }
+
+    #[test]
+    fn filter_for_image_mode_keeps_only_generate_image() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "generate_image",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "write_file",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "read_file",
+            read_only: true,
+        }));
+
+        let names = registry.filter_for_image_mode().names();
+        assert_eq!(names, vec!["generate_image"]);
+    }
+
+    #[test]
+    fn filter_for_plan_mode_keeps_manage_plugin() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "manage_plugin",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "write_file",
+            read_only: false,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "read_file",
+            read_only: true,
+        }));
+
+        let names = registry.filter_for_plan_mode().names();
+        assert!(names.contains(&"manage_plugin".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(!names.contains(&"write_file".to_string()));
+    }
+
+    struct HiddenTool;
+
+    impl Tool for HiddenTool {
+        fn name(&self) -> &str {
+            "hidden_tool"
+        }
+        fn description(&self) -> &str {
+            "not in schema"
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn available(&self) -> bool {
+            false
+        }
+        fn execute(&self, _ctx: &ToolContext, _args: Value) -> Result<String, ToolError> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn unknown_tool_error_lists_schema_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "browser_read",
+            read_only: true,
+        }));
+        registry.register(Arc::new(StubTool {
+            name: "web_search",
+            read_only: true,
+        }));
+        registry.register(Arc::new(HiddenTool));
+
+        let message = registry.unknown_tool_message("puppeteer_navigate");
+        assert!(
+            message.contains("unknown tool: puppeteer_navigate"),
+            "{message}"
+        );
+        assert!(message.contains("`browser_read`"), "{message}");
+        assert!(message.contains("`web_search`"), "{message}");
+        assert!(!message.contains("hidden_tool"), "{message}");
+        assert!(message.contains("Available tools this turn"), "{message}");
+    }
+
+    #[test]
+    fn empty_tool_name_error_lists_schema_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StubTool {
+            name: "ask_user",
+            read_only: false,
+        }));
+        let message = registry.unknown_tool_message("");
+        assert!(message.contains("empty tool name"), "{message}");
+        assert!(message.contains("`ask_user`"), "{message}");
+    }
+}

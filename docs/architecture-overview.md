@@ -1,0 +1,945 @@
+# Acode Architecture Overview
+
+This document describes the logical structure, dependency rules, control flow,
+persistence, and orchestration of Acode. It is intended for contributors who need
+to locate code paths and reason about change impact.
+
+<p>
+  <a href="./architecture-overview.md">English</a> ·
+  <a href="./architecture-overview.zh-CN.md">简体中文</a>
+</p>
+
+|             |                                                    |
+| ----------- | -------------------------------------------------- |
+| **Product** | Acode — Hand your work & questions to Acode anytime. |
+| **Version** | v0.2.34                                            |
+| **Runtime** | Tauri 2 (WebView2 + Rust)                          |
+| **UI**      | Vue 3 · Vite · Pinia · TypeScript                  |
+| **Domain**  | Rust (`src-tauri/src`)                             |
+
+**Related:** [Release](./release.md) · [Docs index](./README.md) · [Companion (Android)](https://github.com/rururunu/AnyaAndroid/blob/main/docs/ARCHITECTURE.md)
+
+---
+
+## 1. Scope
+
+**In scope**
+
+- Process / window topology
+- Layered module boundaries and allowed dependencies
+- Primary chat request path (UI → domain → provider → tools → UI events)
+- Agent turn orchestration and policy hooks (Ask / Agent / Plan / Image gates)
+- Persistence (SQLite, journal, work timeline)
+- Frontend stream projection and session model
+- Extension points (providers, tools, skills, MCP)
+- Companion / Remote Gateway (pairing, LAN vs tunnel, wire protocol, file HTTP)
+
+**Out of scope**
+
+- Provider-specific HTTP schemas
+- Individual tool argument contracts
+- Token hex values / visual polish (the theme **apply path** is in scope)
+
+---
+
+## 2. System context
+
+Acode runs as a **single native process** hosting multiple WebView windows. The
+Rust host owns OS integration; WebViews own presentation and local UI state.
+
+```mermaid
+flowchart LR
+  User((User)) -->|hotkey / tray / input| Host[Acode process]
+  Phone[Acode Companion] -->|WS /remote/v1 · HTTP /f /p| Host
+  IDE[IDE plugins] -->|context push| Host
+  Browser[Chrome / Edge extension] -->|selected text · loopback| Host
+  Host -->|Skills + Deno| Office[Word / Excel / PPT]
+  Host -->|HTTPS SSE / REST| LLM[Model providers]
+  Host -->|HTTPS / stdio| Aux[MCP · search · mem0]
+  Host --> Disk[(SQLite · settings · index)]
+```
+
+| Actor / system           | Interaction                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| User                     | Global hotkey, tray, composer, review UI, embedded settings                              |
+| Acode Companion           | Android remote; LAN `ws` or Cloudflare `wss`; files over HTTP Range `/f/`                |
+| IDE plugins              | Best-effort local context push (file, workspace, selection)                              |
+| Browser Selection Bridge | Optional extension forwards selected webpage text to the local host; no browsing history |
+| Microsoft Office         | Saved-file skills + bundled Deno/JavaScript document runtime                             |
+| Model providers          | Authenticated HTTPS SSE; Chat Completions, Responses, or Anthropic Messages              |
+| MCP / search / mem0      | Optional; enabled explicitly in settings                                                 |
+| Local disk               | Chat DB, settings, `.acode/index`, updater pubkey, checkpoints                            |
+
+---
+
+## 3. Logical architecture
+
+### 3.1 Layers
+
+Dependencies point **downward only**. Cross-layer calls that skip a boundary
+(e.g. Vue store → raw Tauri API, `commands/` → provider HTTP) are treated as bugs.
+
+```mermaid
+flowchart TB
+  subgraph Presentation["L1 Presentation"]
+    Win["Window surfaces<br/>workbench (+ settings) · overlay · preview"]
+    UI["Vue layouts / components / composables"]
+    Store["Pinia stores"]
+  end
+
+  subgraph Bridge["L2 Application bridge"]
+    FeIpc["src/services/ipc<br/>invoke + event listeners"]
+    Cmd["src-tauri/commands<br/>thin #[tauri::command]"]
+    Bus["EventBus · adapters/tauri_events"]
+  end
+
+  subgraph Domain["L3 Domain core"]
+    Chat["core/chat<br/>ChatService · StreamManager · AgentRunner"]
+    AgentShell["core/agent<br/>AgentRuntime · run lifecycle"]
+    Ai["core/ai<br/>providers"]
+    Tools["core/tools<br/>registry · approval · plan gate · sandbox"]
+    Ctx["core/context · workspace · rules · token"]
+    Persist["conversation_manager · db · journal"]
+  end
+
+  subgraph Adapters["L4 Adapters"]
+    Rt["crate::runtime<br/>git · search · browser · shell"]
+    OfficeCore["core/tools/skills · core/mcp · core/lsp"]
+    Remote["core/remote<br/>gateway · upload · download · preview"]
+    Svc["services/<br/>window · hotkey · settings · oauth · pin_badge"]
+  end
+
+  Win --> UI --> Store --> FeIpc
+  FeIpc <-->|IPC| Cmd
+  Cmd --> Chat
+  Svc --> Chat
+  Chat --> AgentShell
+  AgentShell --> Chat
+  Chat --> Ai
+  Chat --> Tools
+  Chat --> Ctx
+  Chat --> Persist
+  Tools --> Rt
+  Tools --> OfficeCore
+  Remote --> Chat
+  Bus --> FeIpc
+  Chat --> Bus
+```
+
+| Layer           | Location                                                      | Responsibility                                                         | Must not                        |
+| --------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------- |
+| L1 Presentation | `src/{layouts,components,composables,stores,pages}`           | Render, local UX state, RAF-batched stream merge                       | Call providers or execute tools |
+| L2 Bridge       | `src/services/ipc`, `commands/`, `adapters/`                  | Serialize IPC DTOs; map `BusEvent` → Tauri emits                       | Own business policy             |
+| L3 Domain       | `core/{chat,ai,tools,agent,context,…}`                        | Chat lifecycle, agent loop, tools, prompts, persistence                | Depend on Vue / DOM             |
+| L4 Adapters     | `runtime/`, `services/`, `core/{tools/skills,mcp,lsp,remote}` | OS, document scripts, HTTP clients, MCP transport, Companion WS / HTTP | Drive the agent loop            |
+
+### 3.2 Frontend dependency rule
+
+```text
+UI → composables → stores → services → services/ipc → Tauri
+                 ↘ services ↗
+```
+
+`stores` and `services` must not import `components` / `layouts` / `pages`.
+Chat image helpers (`saveChatImage`, `localImageSrc`, `imageGenMode`, …) live under
+`services/chat/` for that reason — UI cards only consume them.
+
+### 3.3 Backend dependency rule
+
+```text
+lib / main
+  → commands (IPC façade)
+  → core::* (domain)
+  → runtime / document scripts / mcp (adapters)
+services (window, hotkey, settings) → core where needed
+```
+
+`commands/*` validate input and delegate; orchestration lives in `ChatService`
+and `AgentRuntime`, not in command handlers.
+
+---
+
+## 4. Deployment / process view
+
+One OS process, multiple WebView labels. Domain state is shared in-process.
+
+```mermaid
+flowchart TB
+  subgraph Process["Acode.exe"]
+    Rust["Rust host<br/>hotkey · tray · Deno · SQLite · AgentRuntime · Gateway"]
+    WV1["WebView: workbench<br/>chat · review · embedded settings"]
+    WV2["WebView: overlay"]
+    WV4["WebView: image-preview"]
+  end
+
+  Phone[Acode Companion]
+
+  WV1 <-->|invoke / events| Rust
+  WV2 <-->|invoke / events| Rust
+  WV4 <-->|invoke / events| Rust
+  Phone -->|ws / wss /remote/v1<br/>HTTP /f /p| Rust
+```
+
+| Surface   | Label               | Role                                                                  |
+| --------- | ------------------- | --------------------------------------------------------------------- |
+| Workbench | `workbench`         | Sessions, review, **embedded settings** (no separate settings window) |
+| Overlay   | `overlay*`          | Floating composer; Quick Ask or workspace-bound                       |
+| Preview   | `overlay-preview-*` | Image preview windows                                                 |
+
+Tray **Settings** shows the workbench and emits `open-workbench-settings`. Optional
+**frosted-glass chrome** (`services/workbench_glass.rs`) uses the DWM backdrop on
+the titlebar and sidebars; the conversation pane stays opaque. Maximized /
+fullscreen skips native blur.
+
+### Appearance (light / dark)
+
+Settings expose only **light** and **dark**. Appearance is
+`html[data-theme="light"|"dark"]` plus CSS custom properties in
+`src/services/theme/themes.css`. The document `color-scheme` stays **`only light`**
+so WebView2 does not invert images or native paints; darkness comes from tokens.
+`ThemeService.applyThemeAppearance` is the single apply path (no `.dark` class).
+Frosted glass sets html `color-scheme: normal` so the desktop can show through,
+while body stays `only light`. Legacy palette ids map to light/dark in
+`normalizeThemeId`.
+
+The workbench window corner is `--peek-window-radius` (16px). On Windows,
+`workbench_glass.rs` sets `DWMWCP_DONOTROUND` and clips the HWND with
+`SetWindowRgn` to the same radius (cleared when maximized). The mascot
+(`components/icons/MascotFace.vue`) is an inline SVG blob filled with
+`--peek-text` (eyes in `--peek-bg`); it follows the pointer, blinks, and exposes
+a `state` prop for agent states plus a `tool` prop for the current chat mode.
+Static assets for the icon/tray live in `public/mascot/` and `src-tauri/icons/`.
+
+Session identity (`session_id`) is owned by the Rust conversation store. Overlay
+and Workbench may attach to the **same** session concurrently. Companion attaches
+over the gateway and projects the same store — it does not own a second Agent.
+
+### 4.1 Remote Gateway & Companion
+
+Phone app: [AnyaAndroid](https://github.com/rururunu/AnyaAndroid). Desktop code:
+`src-tauri/src/core/remote/`. Companion is a **projection + RPC client**; this
+process still owns tools, SQLite, and model keys.
+
+```mermaid
+flowchart TB
+  subgraph Phone["Acode Companion"]
+    UI[Compose UI]
+    Client[RemoteGatewayClient]
+    UI --> Client
+  end
+
+  subgraph Path["Reachability"]
+    LAN["Same Wi-Fi<br/>ws://lanHost:8787/remote/v1"]
+    CF["Away<br/>wss://*.trycloudflare.com/remote/v1"]
+  end
+
+  subgraph Desktop["Acode.exe"]
+    GW[http_proxy.rs :8787]
+    Tunnel[cloudflared Quick Tunnel]
+    Pair[pairing.rs]
+    Bridge[bridge.rs → EventBus]
+    Chat[ChatService / AgentRunner]
+    GW --> Pair
+    GW --> Bridge
+    Bridge --> Chat
+    Tunnel --> GW
+  end
+
+  Client -->|"1. LAN first"| LAN --> GW
+  Client -->|"2. public fallback"| CF --> Tunnel
+```
+
+Same port **8787** splits three HTTP surfaces:
+
+```mermaid
+flowchart TB
+  TCP[TCP :8787] --> Disp[http_proxy::dispatch]
+  Disp -->|Upgrade /remote/v1| WS[Companion WebSocket]
+  Disp -->|GET /f/:id| DL[Range download ticket]
+  Disp -->|/p/:id/ cookie Referer| PX[Preview reverse proxy]
+```
+
+```mermaid
+sequenceDiagram
+  participant D as Desktop
+  participant P as Companion
+  D->>D: pairing token + QR (acode://pair)
+  P->>D: WebSocket /remote/v1
+  P->>D: hello deviceId + credential
+  D-->>P: hello.ok
+  D-->>P: event session.snapshot
+  P->>D: chat.send / approval.respond / file.upload.*
+  D-->>P: event (deltas, approvals, file.offer)
+  P->>D: file.download.begin
+  D-->>P: url /f/:id size name
+  P->>D: GET /f/:id Range
+  D-->>P: 206 Partial Content
+```
+
+| Topic                 | Contract                                                                                                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Path / port           | `/remote/v1` on **8787** (LAN `ws`, tunnel `wss`)                                                                                                                                                                         |
+| Auth                  | Short-lived QR token, then stored device credential                                                                                                                                                                       |
+| Keep-alive            | Application `ping` / `pong` (proxies drop native WS pings)                                                                                                                                                                |
+| Phone → desktop       | Chunked `file.upload.*` (JSON+b64 **or** binary WS frames), out-of-order, 512KB, **500MB** cap                                                                                                                            |
+| Desktop → phone       | Offer card → `file.download.begin` → HTTP `/f/{id}` with `Range` (10 min ticket). Legacy: `workspace.readFile` `mode=download` slices                                                                                     |
+| Previews              | HTTP `/p/{id}/` reverse proxy on the same gateway (cookie / Referer fallback)                                                                                                                                             |
+| Unbound phone         | FAB / `chat.send` without `workspaceId` is Quick Ask — **never** inherit the desktop workspace                                                                                                                            |
+| Companion ≥0.1.8 RPCs | `session.rename`, `workspace.pin` / `workspace.update`, `workspace.workingTreeDiff`, `context.environment` (desktop ≥ **0.2.24**)                                                                                         |
+| History RPCs          | `session.history` accepts `limit` and exclusive `beforeMessageId`; explicit `detail: "light"` omits execution bodies, which `session.messageDetail` fetches on demand. Omitted `detail` retains the full legacy response. |
+
+Phone-side diagrams: [Companion architecture](https://github.com/rururunu/AnyaAndroid/blob/main/docs/ARCHITECTURE.md).
+
+### 4.2 Companion file transfer
+
+Workspace chats land under `{workspace}/.acode/uploads/{sessionId}/`. Unbound Ask
+chats land in `{config}/companion-inbox/{sessionId}/`.
+
+```mermaid
+sequenceDiagram
+  participant P as Companion
+  participant GW as Gateway
+  participant Disk as Disk
+  Note over P,Disk: Phone → desktop
+  P->>GW: file.upload.begin size name
+  GW->>Disk: create dest
+  loop concurrent slices
+    P->>GW: chunk JSON+b64 or binary frame
+    GW->>Disk: Seek + write at offset
+  end
+  P->>GW: file.upload.finish
+  Note over P,Disk: Desktop → phone
+  P->>GW: file.download.begin path
+  GW-->>P: url /f/:ticket TTL 10m
+  P->>GW: GET /f/:ticket Range
+  GW-->>P: 200 / 206 stream
+```
+
+---
+
+## 5. Module map
+
+### 5.1 Rust domain (`src-tauri/src/core`)
+
+| Module              | Path                                        | Role                                                                                                                                                                                                             |
+| ------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat service        | `core/chat/service/`                        | Entry: persist messages, resolve context/model, start a new turn (reject when one is already active; `mod.rs` façade)                                                                                            |
+| Stream manager      | `core/chat/stream/`                         | Background task, cancel, stream aggregation, UI events, timeline text                                                                                                                                            |
+| Agent runner        | `core/chat/agent.rs`                        | **Primary** model↔tools loop                                                                                                                                                                                     |
+| Agent loop policies | `core/chat/agent_loop/`                     | stream_turn, tools, challenge, compact, post_edit_verify, soft_inject, failure                                                                                                                                   |
+| Conversation store  | `core/chat/conversation_manager/`           | Façade + `messages` / `activity` / `session` / `branch` / `helpers`; SQLite + work timeline                                                                                                                      |
+| DB / journal        | `core/chat/db/`, `core/chat/journal.rs`     | Schema, save/load, crash recovery (`db/{schema,messages,sessions,tool_activity}`)                                                                                                                                |
+| Prompts (markdown)  | `core/chat/prompts/`, `prompts/*.md`        | System / tools / policies / skills markdown (`include_str!`)                                                                                                                                                     |
+| Prompt builder      | `core/chat/prompt/`                         | Slot assembly (`PromptBuilder` + `slots`) for KV-cache-stable prefixes; volatile + `#skill` chips on user tail; agent-state append-only; tool schemas frozen per turn (DeepSeek disk cache = exact prefix units) |
+| Agent runtime       | `core/agent/runtime/`                       | Run state machine, cancel, debug                                                                                                                                                                                 |
+| AI providers        | `core/ai/`                                  | Chat provider registry, DeepSeek/Gemini, multimodal; **Images API** is separate (`image_gen`)                                                                                                                    |
+| DeepSeek / OpenAI   | `core/ai/deepseek/`                         | `provider`, `messages/`, `stream/`, `anthropic`, `models`, `multimodal`                                                                                                                                          |
+| Shell jobs          | `core/tools/shell_jobs/`                    | Foreground/background shell process lifecycle and output                                                                                                                                                         |
+| Workspace registry  | `core/workspace/`                           | SQLite-backed workspace list (`manager/`, `db`, `helpers`)                                                                                                                                                       |
+| MCP client          | `core/mcp/`                                 | stdio JSON-RPC (`manager`, `process`, `runtime`, `command`, `remote_auth`)                                                                                                                                       |
+| Images API          | `core/ai/image_gen.rs`                      | `POST /v1/images/generations` / `edits` via Settings → Image (`image_providers`)                                                                                                                                 |
+| Image markdown      | `core/ai/image_markdown.rs`                 | Extract / strip `![edit-region]` refs shared by chat, vision, and Images                                                                                                                                         |
+| Tools               | `core/tools/`                               | Registry, approval, plan/image mode gates, files, shell, skills, agent tools                                                                                                                                     |
+| Workspace index     | `core/tools/workspace_index.rs`             | Chunked keyword index under `.acode/index` (incremental JSONL); skips `.acode` via `fs_skip`                                                                                                                       |
+| Plan mode           | `core/tools/plan_mode.rs`                   | Session write gate; Agent may ask via `request_plan_mode`                                                                                                                                                        |
+| Image mode          | `core/tools/image_mode.rs`                  | Per-session toolbar options for `generate_image`; tool whitelist + challenge                                                                                                                                     |
+| Context             | `core/context/`                             | IDE, selection, clipboard, environment                                                                                                                                                                           |
+| Checkpoint          | `core/checkpoint/`                          | Undo / review of applied file changes                                                                                                                                                                            |
+| Token               | `core/token/`                               | Accounting (incl. cache-read / reasoning tokens), usage persistence                                                                                                                                              |
+| MCP / LSP / Office  | `core/mcp`, `core/lsp`, `core/tools/skills` | External protocol adapters                                                                                                                                                                                       |
+| Protocol types      | `core/runtime/`                             | `ChatMessage`, `StreamEvent`, `WorkTimelineItem`                                                                                                                                                                 |
+| Event bus           | `core/event/`                               | Domain events                                                                                                                                                                                                    |
+| Plugins             | `core/plugins/`                             | Manifest, grants, Deno host, official bundles; **computer-use** in `computer/` (UIA, capture, launch)                                                                                                            |
+| Remote gateway      | `core/remote/`                              | WS `/remote/v1`; `gateway/`, `state/`, `bridge/`, pairing, tunnel, upload, **download `/f/`**, preview `/p/`                                                                                                     |
+
+### 5.2 Naming: three “runtime” modules
+
+| Path                  | Meaning                                                           |
+| --------------------- | ----------------------------------------------------------------- |
+| `core/runtime/`       | Chat protocol types (`ChatMessage`, `StreamEvent`, `ChatRequest`) |
+| `crate::runtime/`     | Pluggable tool adapters (git, search, browser, …)                 |
+| `core/agent/runtime/` | Agent **run lifecycle** shell                                     |
+
+### 5.3 Frontend (`src/`)
+
+| Area                        | Path                                                                                | Role                                                                                                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Overlay / Workbench layouts | `layouts/Overlay.vue`, `layouts/Main.vue`                                           | Window shells; workbench embeds SettingsPage; nav in `composables/workbench/`                                                                                           |
+| Chat UI                     | `components/chat/*`                                                                 | Message list, timeline, tool cards, plan approval, composer (`ChatInputBar` + `input/*`)                                                                                |
+| Chat composables            | `composables/chat/`                                                                 | `wireChatIpc`, `useComposer{Draft,Mentions,Layout,Pickers,Resize,Submit,Keyboard}`, `useMessage{Scroll,PreviewRail}`, `useConversationFind`, attachments, ask-user flow |
+| Chat store                  | `stores/chat.ts`, `stores/chatSessions.ts`                                          | Pinia façade; session list/archive/title and history page cursors in `chatSessions`; compose/stream helpers in sibling modules                                          |
+| Workbench composables       | `composables/workbench/`                                                            | `useWorkbenchNavigation`, `useNavigationSidebar`, sessions/workspaces/review lifecycle                                                                                  |
+| Other stores                | `stores/setting.ts`, `chatModel.ts`, `plugins.ts`                                   | Settings, cached model catalog with background discovery, user plugins                                                                                                  |
+| Theme                       | `services/theme/`                                                                   | Catalog (light/dark), `ThemeService` apply path, `themes.css` tokens                                                                                                    |
+| Chat services               | `services/chat/`                                                                    | Image gen mode, local image src, save image, composer segments, token estimate                                                                                          |
+| IPC                         | `services/ipc/`                                                                     | Typed invoke + event subscription                                                                                                                                       |
+| Stream batching             | `services/chat/rafBatch.ts`, `composables/chat/wireChatIpc.ts`                      | RAF coalesce; chat IPC wiring extracted from `main.ts`                                                                                                                  |
+| Settings pages              | `pages/Settings/`                                                                   | Provider / agent / MCP / skills / **Image** providers                                                                                                                   |
+| Profile settings            | `components/settings/ProfileSettings.vue`, `services/settings/`                     | Local profile, avatar, portable settings import/export, and usage insights                                                                                              |
+| Browser selection           | `services/browser_selection.rs`, `bin/acode_browser_bridge.rs`, `browser-extension/` | Optional authenticated local bridge for webpage selections                                                                                                              |
+
+---
+
+## 6. Control flow — chat send
+
+### 6.1 Happy path
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant FE as Presentation
+  participant IPC as commands/chat
+  participant CS as ChatService
+  participant AR as AgentRuntime
+  participant SM as StreamManager
+  participant R as AgentRunner
+  participant P as AIProvider
+  participant T as Tools
+  participant CM as ConversationManager
+
+  FE->>IPC: invoke("chat")
+  IPC->>CS: send(session, message, prefs)
+  alt active assistant for session
+    CS-->>FE: reject (TurnInProgress)
+  else new turn
+    CS->>CM: persist user + pending assistant
+    CS->>AR: create_run + collect_context
+    CS->>SM: spawn stream task
+    SM->>R: run(ChatRequest, tx)
+    loop until terminal finish_reason
+      R->>P: stream(request)
+      P-->>SM: Delta / Reasoning / Status / ToolCall
+      SM->>CM: append_work_timeline_text
+      SM-->>FE: chat-delta / chat-reasoning / chat-status
+      opt tool_calls non-empty
+        R->>T: execute serial or parallel
+        T->>CM: upsert_tool_activity (+ timeline Tool)
+        T-->>FE: tool-started / tool-finished
+        R->>R: append tool results to messages
+      end
+    end
+    SM->>CM: update_message (Done + content/reasoning/timeline)
+    SM-->>FE: chat-finished or chat-error
+  end
+```
+
+Queued "Send now" cancels the current turn first, then follows the new-turn path above.
+
+### 6.2 Frontend projection
+
+```mermaid
+flowchart LR
+  Emit[Tauri emit] --> Listen[wireChatIpc listeners]
+  Listen -->|delta / reasoning| RAF[createRafBatch]
+  Listen -->|tool / finish / error| Sync[Immediate store update]
+  RAF --> Store[chatStore.applyStreamDeltas]
+  Sync --> Store
+  Store --> UI[MessageList / AgentWorkDetails]
+```
+
+Transient transport and HTTP errors (408, 429, 5xx) use five provider attempts
+with exponential backoff, jitter, and `Retry-After`. The agent can then recover
+the pending model round up to three more times; committed tools are never replayed.
+Retries emit `chat-status` with `kind = stream_retry:{attempt}:{max}` and a
+committed message snapshot. The backend and UI discard only the failed attempt,
+preserving completed text, reasoning, tool evidence, and timeline entries.
+
+Context-limit errors from every compatible model trigger compaction, with up to
+three consecutive shrinking attempts. Compaction keeps retained tool results
+paired with their assistant calls. Completion budgets reset on distinct successful
+evidence; truncated answers and unresolved criteria continue within bounded budgets.
+Subagents use the same failure/progress guards instead of a fixed 24-step ceiling.
+
+Finite long shell commands may run in the background and must be polled to actual
+exit before completion. Foreground commands stop on process exit, cancellation,
+or their explicit ceiling; model suggestions and silent I/O waits do not kill them.
+The legacy unrestricted 120-second default migrates once to 3600 seconds, while
+custom and restricted-shell limits are preserved. Recovery keeps the live request
+and existing journal/checkpoints; it does not resume execution after an app restart.
+
+### 6.3 Call stack (reference)
+
+```text
+commands/chat.rs::chat
+  → ChatService::send
+      → AgentRuntime::{create_run, collect_context}
+      → StreamManager::spawn
+          → AgentRunner::run
+              → agent_loop::collect_stream_turn
+              → AIProvider::stream
+              → agent_loop::tools::{execute_serial, execute_parallel}
+              → agent_loop::{challenge, mid_turn_compact, post_edit_verify, soft_inject, failure}
+```
+
+---
+
+## 7. Orchestration — AgentRunner loop
+
+`AgentRunner::run` is the single orchestration spine for chat, eval, and
+sub-agents. Policy modules in `agent_loop/` plug into that spine.
+
+```mermaid
+stateDiagram-v2
+  [*] --> SoftInject: run / continue
+  SoftInject --> CheckSteps: drain soft_queue
+  CheckSteps --> StopMaxSteps: steps >= max_steps
+  CheckSteps --> Compact: else
+  Compact --> StreamTurn: maybe mid-turn compact
+  StreamTurn --> FinalGate: no tool_calls
+  StreamTurn --> ToolPhase: tool_calls
+  FinalGate --> SoftInject: challenge continue
+  FinalGate --> [*]: Finish
+  ToolPhase --> StopDenied: user denied
+  ToolPhase --> StopBreaker: FailureBreaker tripped
+  ToolPhase --> SoftInject: append results, steps++
+  StopMaxSteps --> [*]
+  StopDenied --> [*]
+  StopBreaker --> [*]
+```
+
+| Module             | Concern                                                                                                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stream_turn`      | Fold one provider stream into content / reasoning / tool_calls; forward UI events                                                                                |
+| `tools`            | Serial vs parallel dispatch; tool activity events                                                                                                                |
+| `challenge`        | Empty completion / all goal paths / unverified mutation / open checklist / stall; verification requires read-back of mutated paths or a successful check command |
+| `mid_turn_compact` | Context-window pressure compaction (mechanical summary pins goals/paths; may fold append-only agent-state)                                                       |
+| `task_state`       | Runtime task memory; injects append-only `agent-state-*` user tips (never relocate mid-history)                                                                  |
+| `post_edit_verify` | After a successful file mutation, run a light check; **only `exit_code=0` counts**; feed result as **system text** (not `role=tool`)                             |
+| `soft_inject`      | The loop can still drain an internal follow-up queue. Composer "Send now" does not use it: it cancels the current turn and starts a new one                      |
+| `failure`          | Consecutive / identical tool-error circuit breaker                                                                                                               |
+
+Tool schemas for the turn are **frozen on the first provider step** (`AgentRunner`
+keeps the initial `focused_schemas` `Arc`). Mid-turn Plan accept / question-only
+flips must not rebuild `tools` — that would invalidate provider prefix caches
+(especially DeepSeek disk cache). Writers stay blocked by `PlanModeStore::authorize`
+even when still present in the frozen Agent schema set; Agent schemas keep
+`save_plan` so Plan can be accepted mid-turn without a schema rebuild.
+
+### Ask / Agent / Plan / Image
+
+Enforced at **tool schema exposure**, **approval policy**, the **plan gate**, and
+**image-mode** session options — not by a separate runner.
+
+| Mode      | Behavior                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------- |
+| **Ask**   | Withholds write / shell / git                                                                        |
+| **Agent** | Enables writes under approval; may call `request_plan_mode` (never silent-enters the gate)           |
+| **Plan**  | User-selected or accepted after `request_plan_mode`; write tools blocked until the user approves     |
+| **Image** | Only `generate_image` is exposed; toolbar size/quality/style pinned; challenge requires a real image |
+
+### Plan gate
+
+Plan state lives in-process in `core/tools/plan_mode.rs` (`PlanModeStore` keyed by
+`session_id`). It is orthogonal to compose `ChatMode`: while the gate is on,
+writes are denied even if the composer still shows Agent.
+
+```mermaid
+flowchart TB
+  Send[ChatService::send] --> Mode{chat_mode?}
+  Mode -->|Ask| Clear[Clear gate]
+  Mode -->|Plan| On[Open gate]
+  Mode -->|Agent| Hint[Inject plan-request-hint.md<br/>unless skip_auto_plan]
+  Hint --> AskPlan{Model calls<br/>request_plan_mode?}
+  AskPlan -->|user accepts| On
+  AskPlan -->|decline / skip| Off[Stay in Agent]
+  On --> Prompt[Inject plan-mode.md<br/>gate blocks writers]
+  Prompt --> Draft[Assistant drafts plan and stops]
+  Draft --> UI[MessageList footer<br/>PlanApprovalCard]
+  UI -->|Exit plan| Clear
+  UI -->|Approve and run| Exec[Clear gate + skip_auto_plan<br/>send execute prompt]
+  Exec --> Writers[Write tools available]
+```
+
+| Piece              | Location                                                                                                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Plan ask hint      | `prompts/plan-request-hint.md` (Agent turns; stable policy-suffix slot)                                                                                                   |
+| Request tool       | `request_plan_mode` → user accept/decline                                                                                                                                 |
+| Turn-start schemas | Manager registry as-is (Ask spawn already uses `ask_mode()`). No question-only shrink. Plan does **not** shrink schemas; `authorize` blocks writers. Frozen for the turn. |
+| Gate authorize     | `PlanModeStore::authorize` (deny non-read-only writes; primary enforcement)                                                                                               |
+| Prompt             | `prompts/plan-mode.md` (+ `ensure_plan_mode_prompt` if accepted mid-turn)                                                                                                 |
+| Plan steps         | tools `update_tasks` / `todo_write` → `task-list-updated` / message `toolActivities`                                                                                      |
+| Approval UI        | `PlanApprovalCard.vue` at the **end of the last completed assistant message** (same tier as `CodeChangesSummary`)                                                         |
+| Approve action     | clear gate → compose back to Agent → `send(..., skipAutoPlan/resumePlan)`; short approve text persisted; checklist injected into the API request only                     |
+
+There is **no** `should_auto_plan` heuristic: Agent never silent-opens the gate.
+
+The approval card is **not** an input-bar banner (avoids pushing the composer);
+steps sit alongside the code-changes summary.
+
+### Image mode
+
+Image mode is a dedicated `chat_mode` (composer chip), not a chat-provider model
+switch. Credentials and base URL come from **Settings → Image** (`image_providers`);
+chat `custom_providers` are never used for `generate_image`.
+
+```mermaid
+flowchart LR
+  UI[ImageGenToolbar] --> Compose[sessionCompose.imageGen]
+  Compose --> Send[ChatService::send]
+  Send --> Store[image_mode session options]
+  Send --> Prompt[image-mode.md + ImageModePolicy]
+  Send --> Tools[tools.image_mode whitelist]
+  Tools --> Gen[generate_image]
+  Gen --> API[Images API generations or edits]
+  API --> MD[markdown + acode-images JSON fence]
+  MD --> Card[GeneratedImageCard]
+```
+
+| Piece             | Location                                                                  |
+| ----------------- | ------------------------------------------------------------------------- |
+| Toolbar / payload | `services/chat/imageGenMode.ts` (UI `resolution` ≠ Images API `quality`)  |
+| Session options   | `core/tools/image_mode.rs`                                                |
+| Prompt            | `prompts/image-mode.md` + `prompt/slots`                                  |
+| Tool              | `core/tools/builtin/image_gen.rs`                                         |
+| HTTP adapter      | `core/ai/image_gen.rs` (blocking + `run_isolated`)                        |
+| Markdown helpers  | `core/ai/image_markdown.rs`                                               |
+| Challenge         | `agent_loop/challenge.rs` `require_image`                                 |
+| Result parsing    | `services/chat/localImageSrc.ts` (`acode-images` fence, markdown fallback) |
+| Preview / save    | `services/chat/saveChatImage.ts`, `GeneratedImageCard.vue`                |
+
+Defense in depth: `ChatService` selects `tools.image_mode()`, and
+`ToolManager::schemas_for_request` re-checks `is_image_mode(session_id)`.
+
+### AgentRunner vs AgentRuntime
+
+|                | AgentRunner                                 | AgentRuntime                                                        |
+| -------------- | ------------------------------------------- | ------------------------------------------------------------------- |
+| Question       | “What does the model do next?”              | “Is this run active / cancelled?”                                   |
+| Owns           | Stream turns, tool batches, completion gate | Run id, epoch, cancellation, event bridge                           |
+| Call direction | Invoked by `StreamManager`                  | Creates run; delegates streaming to `StreamManager` → `AgentRunner` |
+
+Planner / executor under `core/agent/` support run-level plan steps and a tool
+façade. They are **not** a second chat agent loop.
+
+---
+
+## 8. Work timeline (interleaved UI)
+
+Narration and tool cards must appear in the order they actually happened.
+
+```mermaid
+flowchart TB
+  subgraph Timeline["work_timeline on ChatMessage"]
+    R1[Reasoning run]
+    T1[Tool activity ref]
+    C1[Content run]
+    T2[Tool activity ref]
+    C2[Content run]
+  end
+
+  R1 --> T1 --> C1 --> T2 --> C2
+```
+
+| Kind        | Produced when                          | Persistence                                             |
+| ----------- | -------------------------------------- | ------------------------------------------------------- |
+| `reasoning` | Stream reasoning chunks                | Merged into trailing same-kind item; saved with message |
+| `content`   | Stream content deltas                  | Same merge rules                                        |
+| `tool`      | First `upsert_tool_activity` for an id | Anchored at start time; status updates do not duplicate |
+
+Frontend `AgentWorkDetails` renders the timeline and reconciles trailing text if
+history predates the feature or a lump reply arrives without incremental deltas.
+
+---
+
+## 9. Persistence & crash recovery
+
+```mermaid
+flowchart TB
+  Live[In-memory ConversationManager] -->|terminal update / tool done| DB[(chat_messages SQLite)]
+  Live -->|streaming deltas| J[(chat_journal_events)]
+  Boot[App start] --> Hydrate[hydrate_orphaned_from_journal]
+  Hydrate --> Settle[settle pending/streaming + running tools]
+  Settle --> DB
+```
+
+| Store                 | Contents                                                                                     |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `chat_messages`       | Messages: content, reasoning, tool_activities, **work_timeline**, tool_calls, status, tokens |
+| `chat_journal_events` | Compacted delta snapshots for in-flight recovery                                             |
+| Session metadata      | Titles, workspace bindings                                                                   |
+| Token usage records   | Per-run accounting when providers report usage; DeepSeek cache-read / reasoning tokens       |
+
+On boot, orphaned `pending` / `streaming` messages are hydrated from the journal
+and settled to a terminal state so the UI cannot stick on “executing”.
+
+---
+
+## 10. Context assembly & prompt-cache stability
+
+Before a turn streams, `PromptBuilder` assembles fixed slots so provider
+**prefix caches** (DeepSeek disk KV cache and similar) can reuse an exact
+leading unit across steps and turns.
+
+```text
+[0] SYSTEM_PROMPT
+[1] stable workspace / IDE identity
+[2] project rules (agent.md / AGENTS.md)
+[3] recalled memories
+[4] optional policy suffix (collab / minimal-coding / plan hint / plan-mode / …)
+[5] plugin prompt suffix (blocks sorted for determinism)
+[6..] history + current user
+       └─ preferred #skill / #mcp chips + live IDE/git/clipboard
+          appended to the **current user** text (never mid-prefix system slots)
+```
+
+```mermaid
+flowchart LR
+  SYS[System + stable slots] --> HIST[Prior messages]
+  HIST --> USER[Current user + volatile tail]
+  TOOLS[Tool schemas frozen per turn] --> REQ[Provider request]
+  SYS --> REQ
+  HIST --> REQ
+  USER --> REQ
+```
+
+### DeepSeek-oriented rules (also help other prefix caches)
+
+Official behavior ([Context Caching](https://api-docs.deepseek.com/guides/kv_cache/)):
+cache hits require a **full match** of a persisted prefix unit (Sliding Window
+Attention). Construction takes seconds; hits are best-effort. Practical rules
+we enforce in-product:
+
+| Rule                               | Implementation                                                     |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| Append-only history inside a turn  | Tool results only push; never rewrite earlier messages             |
+| Never relocate mid-history state   | `task_state::inject` updates the tip or appends `agent-state-{n}`  |
+| Stable `tools` for the turn        | First step’s schemas frozen on `AgentRunner`                       |
+| Volatile UI context off the prefix | Cursor / selection / git / clipboard / `#skill` chips on user tail |
+| Deterministic plugin prose         | Plugin prompt blocks sorted before assemble                        |
+
+**Hit-rate expectations:** multi-step Agent turns often land ~85–95% on steps
+after the cold first call when the prefix stays intact. Session aggregates are
+lower because every new user text and large tool payload is a miss — that is
+billing math, not a broken cache. Code-edit workloads with big `read_file` /
+search results rarely sustain 95%+ on the **session** meter.
+
+Resolution precedence for paths lives in `prompts/context.md` and
+`core/context` providers (explicit user path beats inferred active file, etc.).
+
+Usage UI: `prompt_cache_hit_tokens` / miss fields → `cacheReadTokens`; hit % =
+`cacheRead / (inputMiss + cacheRead)` (`services/chat/tokenEstimate.ts`).
+
+---
+
+## 11. Tools, approval, and skills
+
+Implementation details and scope boundaries are documented in [permissions and code preview](./permissions-and-preview.md).
+
+Workbench and overlay use the same pending-interaction queue projection. Startup, focus and session changes reconcile backend snapshots; a global snapshot restores background-session requests too. Backend sequence numbers preserve request order, and resolved ids prevent late events or snapshots from reviving completed cards. All approval/question terminal paths broadcast `interaction-resolved`, including cancellation and timeout. Image tabs, selected image and subagent entry state are shared per root session through `acode.shared-review.v1.*`; native window dimensions remain local.
+
+Permission scope is independent of Ask/Agent/Plan chat mode. The three UI modes are **Read-only**, **Workspace-write**, and **Full-access**; legacy persisted values `ask`, `auto`, and `alwaysAllow` map to these modes respectively. Read-only rejects filesystem mutations and arbitrary shell execution, including DeepSeek tool aliases. Workspace-write permits native file edits in the workspace; external paths keep their path gate, and unsandboxed shell execution requires approval for each invocation. Full-access bypasses these interactive gates while retaining explicit safety rules. Tool approval grants only the current request; tool-wide session grants are removed. Pending tool/path decisions follow cancellation and expire after ten minutes. Policy changes and human approval requests/outcomes are committed to `chat_permission_events`; failed audit writes deny execution. These checks do not provide dsh's OS-enforced process sandbox.
+
+```mermaid
+flowchart TB
+  Model[Model tool_calls] --> Reg[ToolRegistry]
+  Reg --> Mode{Ask / Agent / plan gate / image mode / read_only?}
+  Mode -->|blocked| Deny[Schema omitted or denied]
+  Mode -->|allowed| Appr[Approval policy]
+  Appr -->|ask user| UI[ask_user / permission UI]
+  Appr -->|allow| Exec[Builtin / Skill / MCP / Office / Subagent]
+  Exec --> Act[ToolActivity + work_timeline]
+  Exec -->|update_tasks| Tasks[sessionTasks + PlanApprovalCard]
+```
+
+While the plan gate is on, writer tools may still appear in the schema but are
+denied by `PlanModeStore::authorize`. **Ask** withholds writers by spawning an
+`ask_mode()` tool manager (not by a per-message question heuristic). Agent/Plan
+turns share the full registry and freeze it for the turn.
+`update_tasks` (and read-only exploration) stay available.
+
+Skills are markdown playbooks under `src-tauri/prompts/skills/` (plus vendor
+assets). Invoking a skill typically injects the playbook and may run a subagent
+with optional `read_only`. The former built-in `bid_tech` Python package is no
+longer shipped; document-generation skills use the external skill flow.
+
+### 11.1 Provider protocol and reasoning resolution
+
+The provider boundary keeps model selection, capability metadata, protocol
+selection, and wire parsing together while leaving `ChatService` provider-neutral.
+
+```mermaid
+flowchart LR
+  Settings[Provider settings] --> Registry[ProviderRegistry]
+  Registry --> ModelRef[ModelRef + capabilities]
+  ModelRef --> Reasoning[ReasoningProfile]
+  ModelRef --> Protocol[WireProtocol]
+  Protocol -->|primary| Request[Provider request]
+  Request -->|format rejected| Fallback[Protocol fallback]
+  Fallback --> Request
+  Request --> Stream[Chat / Responses / Anthropic SSE]
+  Stream --> Cache[Remember model protocol]
+```
+
+`reasoningProfiles` maps model families to supported levels. `reasoningControl`
+uses advertised capabilities first and provider/model inference second. The
+request layer clamps unsupported values and emits the provider-specific fields:
+`thinking`, `enable_thinking`, or `reasoning.effort` / `reasoning_effort`.
+
+Custom providers may select Chat Completions, Responses, or Anthropic Messages.
+When a format rejection is recognizable, the registry tries the remaining wire
+protocols and remembers the successful protocol per provider and model. Disabled
+models are rejected before any network request.
+
+### 11.2 Workspace index
+
+`search_codebase` refreshes the workspace keyword index, ranks keyword matches, and returns the requested number of results. The index covers overlapping content chunks, symbols, file paths, and decision documents (AGENTS.md / ADR). JSONL records are stored under `{workspace}/.acode/index/`, with incremental updates for changed files.
+
+Implementation: `core/tools/workspace_index.rs`; tool entry point: `core/tools/builtin/misc.rs`.
+
+### 11.3 Computer use
+
+Official plugin `computer-use` (`core/plugins/computer/`, Windows, off until
+Enable). In-process Ghost (`ghost-session`); Deno host only declares schemas.
+Pipeline: `window` anchor → `see` → `act` (read `verified`) → `wait`/`assert`;
+browser via `browser`/`tab` (CDP). Acode keeps grants, approval, and HUD. Bundled
+playbook: `src-tauri/plugins/computer-use/skills/windows.md` via
+`contributes.agent.skills`.
+
+See [Computer use](./computer-use.md).
+
+---
+
+## 12. Event contract (domain → UI)
+
+Events are defined in `core/event::BusEvent` and projected by
+`adapters/tauri_events.rs`.
+
+| BusEvent          | Tauri event                      | Consumer effect                                    |
+| ----------------- | -------------------------------- | -------------------------------------------------- |
+| `ChatStarted`     | `chat-started`                   | Insert user + pending assistant                    |
+| `ChatDelta`       | `chat-delta`                     | Append content (RAF-batched)                       |
+| `ChatReasoning`   | `chat-reasoning`                 | Append reasoning                                   |
+| `ChatStatus`      | `chat-status`                    | Activity label / `stream_retry` reset              |
+| `ChatFinished`    | `chat-finished`                  | Replace content, mark done                         |
+| `ChatError`       | `chat-error`                     | Mark error, surface message                        |
+| Tool activity     | `tool-started` / `tool-finished` | Upsert tool cards                                  |
+| `PlanModeChanged` | `plan-mode-changed`              | Sync gate; may switch compose to Plan              |
+| `TaskListUpdated` | `task-list-updated`              | Update `sessionTasks` (steps for PlanApprovalCard) |
+
+Command results (`ChatSendResponse`) return ids only; streaming content is
+event-driven.
+
+---
+
+## 13. Session / workspace model
+
+| Kind                           | Binding       | Typical entry                                                        |
+| ------------------------------ | ------------- | -------------------------------------------------------------------- |
+| Quick Ask                      | No workspace  | Overlay outside IDE                                                  |
+| Workspace session              | Bound folder  | IDE foreground, `/work`, picker                                      |
+| Pinned                         | User pin flag | Workbench sidebar                                                    |
+| Archived workspace             | Bound folder  | Workbench archive / restore                                          |
+| Companion FAB (no workspaceId) | No workspace  | Phone new chat — **must not** inherit the desktop selected workspace |
+
+Overlay and workbench share the conversation store; “open in workbench” reuses
+the same `session_id`. Workspace ordering, pinning, collapsed state, and archive
+status are persisted separately from chat messages. Companion projects the same
+store over the gateway.
+
+The desktop `chat_history` IPC returns the newest window with `hasMore`,
+`oldestId`, and `oldestTimestamp`. `beforeId` anchors older pages even when
+messages share a timestamp; metadata associated with messages is scoped to the
+returned window. The full transcript remains in the Rust conversation store
+for the Agent. The frontend prepends older pages when the user scrolls upward
+and preserves the scroll anchor.
+
+`chatModel.ts` seeds the picker from `services/chat/modelListCache.ts` or
+configured model IDs, then refreshes provider discovery in the background.
+`services/settings/startupCache.ts` seeds composer model and reasoning controls
+before the settings IPC returns; persisted settings remain authoritative.
+Navigation expansion IDs live in browser storage through
+`composables/workbench/navigationCollapseState.ts`; unlisted sections and
+workspaces start collapsed.
+
+---
+
+## 14. Update / release data flow
+
+```mermaid
+flowchart LR
+  Tag[git tag v*] --> CI[release.yml]
+  CI --> MSI[Acode_x_x64.msi + .sig]
+  CI --> LJ[latest.json]
+  MSI --> GH[GitHub Release assets]
+  LJ --> GH
+  App[Installed Acode] -->|updater plugin| GH
+```
+
+Details: [release.md](./release.md).
+
+---
+
+## 15. Extension points
+
+| Intent                  | Preferred hook                                                              |
+| ----------------------- | --------------------------------------------------------------------------- |
+| New model vendor        | `core/ai` `AIProvider` impl + settings wiring                               |
+| New built-in tool       | `core/tools` registry + optional `runtime/` adapter                         |
+| New turn policy         | `core/chat/agent_loop` module called from `AgentRunner`                     |
+| New window surface      | Tauri window label + `src/main.ts` bootstrap branch                         |
+| External context source | `core/context` provider                                                     |
+| New skill               | `src-tauri/prompts/skills/*.md` (+ assets if needed)                        |
+| Agent plugin playbook   | `contributes.agent.skills` markdown (see [Computer use](./computer-use.md)) |
+| Companion RPC / event   | `core/remote/protocol.rs` + phone client in AnyaAndroid                     |
+
+Avoid introducing a parallel agent loop beside `AgentRunner`.
+Companion must not grow a second Agent runtime.
+
+---
+
+### 15.1 Native tools and delivery in v0.2.26
+
+The optional Chrome / Edge Selection Bridge sends selected webpage text through a registered native messaging host to an authenticated loopback listener. Cached selections are bound to the foreground browser window and expire after 60 seconds; browser history is not collected. See [extension setup and boundaries](../browser-extension/README.md).
+
+The resolved model determines whether `core/tools/dsh/` is selected, rather than the provider name alone. Main and child tasks select their own tool sets; `present` is also available in the general registry. Imported static contracts live in `prompts/dsh/`; execution and approval use the Acode host. See [native DeepSeek tools](./deepseek-harness.md).
+
+`core/tools/present.rs` validates path permissions and regular files and returns versioned metadata. `agent_loop/tools.rs` and `db/tool_activity.rs` preserve successful structured delivery results. On the frontend, `presentedFiles.ts` derives cards from completed main-task tool activities, `PresentedFiles.vue` renders interactions and `DeliveryFileIcon.vue` uses local SVGs. No separate delivery table or final-response scanning is introduced. See [file delivery](./file-delivery.md).
+
+`core/tools/skills/office_runtime.rs` hosts saved-file workflows; `scripts/build-office-runtime.mjs` produces bundled resources. Office rendering is a skill capability; delivery cards currently have no built-in Office/PDF preview sidebar.
+
+Call diagnostics go to configuration-directory JSONL files; `scripts/deepseek-metrics-report.mjs` aggregates usage, latency and independently judged outcomes. Reasoning/tool pairing, request-copy trimming and model-phase retries preserve completed tool boundaries; this does not imply automatic task resumption after every process crash. Proposed journal queue reliability, lifecycle cleanup and further virtualization are not new capabilities of this release.
+
+### 15.2 Composer, windows, settings, and updates in v0.2.27
+
+`ChatInputBar.vue` and `UserMessageFooter.vue` keep the current composer and sent-message editor controls aligned. Model and thinking controls sit on the right; the narrow layout hides selected labels, while thinking effort remains text-only. `useComposerPickerFocus.ts` coordinates picker focus, and the thinking slider commits the final drag value. In `stores/setting.ts`, reasoning-effort and approval-only patches update the composer optimistically without reapplying the full theme and settings snapshot on the following broadcast.
+
+`layouts/Overlay.vue` measures content before resizing the input window and skips unchanged native sizes. Chat scrolling waits for content growth in `useMessageScroll.ts`. The Windows context provider reads selection geometry before the overlay takes focus; `services/window.rs` uses available geometry to position the overlay near, rather than over, the selection.
+
+`services/settings_store.rs` moves embedded theme images into content-addressed files under the app settings directory's `theme-backgrounds` folder. Runtime settings retain file paths, while readable images remain embedded in portable profile exports. `commands/settings.rs` performs settings I/O on a blocking worker instead of the window event thread.
+
+`SidebarUpdateButton.vue` appears when `stores/updater.ts` reports an available version. `WorkbenchUpdateDialog.vue` shows release notes before install and shares `UpdaterProgress.vue` with About settings.
+
+## 16. Related source entry points
+
+| Concern                          | Start here                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| App bootstrap / tray / hotkey    | `src-tauri/src/lib.rs`                                                                                 |
+| Chat IPC                         | `commands/chat.rs`                                                                                     |
+| Send + context / plan gate       | `core/chat/service/`, `core/tools/plan_mode.rs`                                                        |
+| Stream lifecycle + timeline text | `core/chat/stream/`                                                                                    |
+| Work timeline persistence        | `core/chat/conversation_manager/`, `core/chat/db/`                                                     |
+| Agent loop                       | `core/chat/agent.rs`, `core/chat/agent_loop/`                                                          |
+| Run shell                        | `core/agent/runtime/`                                                                                  |
+| Image mode / Images API          | `core/tools/image_mode.rs`, `core/ai/image_gen.rs`, `prompts/image-mode.md`                            |
+| Frontend IPC + stream batch      | `src/services/ipc/`, `src/composables/chat/wireChatIpc.ts`, `src/stores/chat.ts`                       |
+| Chat store helpers               | `src/stores/chatSessions.ts`, `chatCompose.ts`, `chatHistory.ts`, `chatStream.ts`                      |
+| Composer extraction              | `src/composables/chat/useComposer*.ts`, `useMessageScroll.ts`, `useMessagePreviewRail.ts`              |
+| Rust chat modules                | `core/chat/{db,service,stream}/` (facade `mod.rs` keeps command imports stable)                        |
+| Remote gateway / pairing         | `core/remote/gateway/`, `pairing.rs`, `tunnel.rs`                                                      |
+| Shell jobs / workspace / MCP     | `core/tools/shell_jobs/`, `core/workspace/`, `core/mcp/`                                               |
+| Plugins / computer use           | `core/plugins/`, `src-tauri/plugins/computer-use/`, [Computer use](./computer-use.md)                  |
+| DeepSeek stream                  | `core/ai/deepseek/stream/`                                                                             |
+| Gateway HTTP split               | `core/remote/http_proxy.rs` (`/remote/v1`, `/f/`, `/p/`)                                               |
+| Companion file transfer          | `core/remote/upload.rs`, `download.rs`                                                                 |
+| Workspace index                  | `core/tools/workspace_index.rs`                                                                        |
+| Theme apply path                 | `src/services/theme/`, `stores/setting.ts` `applyTheme`                                                |
+| Theme image persistence          | `services/settings_store.rs`, `commands/settings.rs`, `src/stores/setting.ts`                          |
+| Composer and sent-message editor | `src/components/chat/ChatInputBar.vue`, `UserMessageFooter.vue`                                        |
+| Overlay positioning and sizing   | `services/window.rs`, `core/context/provider/clipboard_provider.rs`, `src/layouts/Overlay.vue`         |
+| In-app updater UI                | `src/components/workbench/SidebarUpdateButton.vue`, `WorkbenchUpdateDialog.vue`, `UpdaterProgress.vue` |
+| Workbench glass / window radius  | `services/workbench_glass.rs`, `overlay/appearance.ts`                                                 |
+| Phone app                        | [AnyaAndroid](https://github.com/rururunu/AnyaAndroid)                                                 |
+
+Successful text-file reads render as collapsible syntax-highlighted code cards. Clicking the file opens a read-only sidebar in either the workbench or popup and highlights the returned line range. The sidebar supports line wrapping; when the file changed, it retains the captured excerpt and can open the current file context. The preview command accepts a recorded successful read activity ID, resolves its original workspace, and loads up to 1 MiB of UTF-8 text. Unavailable files fall back to the captured read excerpt.
+
+The Diff sidebar stacks files in one continuous view; its file tree navigates and collapses automatically in narrow space. Diff bodies outside the viewport or in an inactive sidebar unmount while preserving measured placeholder heights. Streaming Markdown parses during idle time, and the live work timeline avoids repeated full-text reconciliation to reduce input latency. Companion receives current code through `session.readCodePreview`, archived workspace snapshots through `workspace.archived.snapshot`, and only allowlisted compose defaults through `settings.defaults`, not the full settings object or credentials.

@@ -1,0 +1,581 @@
+export type AppLanguage = "zh-CN" | "en-US" | "ja-JP" | "ru-RU" | "de-DE" | "fr-FR" | "ko-KR";
+
+/** Built-in presets available out of the box. */
+export type BuiltinThemeId = "light" | "dark";
+
+/** Color scheme or custom theme identifier. */
+export type ThemeId = BuiltinThemeId | (string & {});
+
+export type ColorScheme = ThemeId;
+
+export interface ThemeBackgroundConfig {
+  /** Local file path, path: URI, or URL to background image */
+  image?: string;
+  /** Background opacity (0.05 to 1.0, default 0.2) */
+  opacity?: number;
+  /** Blur radius in px (0 to 30, default 0) */
+  blur?: number;
+  /** Sizing fit: cover, contain, fill, or center */
+  fit?: "cover" | "contain" | "fill" | "center";
+}
+
+export interface CustomThemeConfig {
+  id: string;
+  name: string;
+  mode: "light" | "dark";
+  description?: string;
+  tokens: Record<string, string>;
+  background?: ThemeBackgroundConfig;
+  updatedAt: number;
+}
+
+export type ReasoningEffort =
+  "disabled" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export const ALL_REASONING_EFFORTS: ReasoningEffort[] = [
+  "disabled",
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+export function isReasoningEffort(value: string): value is ReasoningEffort {
+  return ALL_REASONING_EFFORTS.includes(value as ReasoningEffort);
+}
+
+export function normalizeReasoningEffort(value: unknown): ReasoningEffort {
+  return typeof value === "string" && isReasoningEffort(value) ? value : "disabled";
+}
+
+export type ReasoningLanguage = "auto" | "zh" | "en";
+
+/** How agent tool/work cards are shown in chat. */
+export type AgentWorkDisplay = "detailed" | "compact";
+
+export type WebSearchProvider = "serper" | "tavily";
+
+export type ToolApprovalMode = "ask" | "auto" | "alwaysAllow";
+
+/** Chat interaction mode: Agent can mutate; Ask is read-only; Plan drafts first; Image always generates. */
+export type ChatMode = "agent" | "ask" | "plan" | "image";
+
+export function normalizeChatMode(value: unknown): ChatMode {
+  if (value === "ask" || value === "plan" || value === "agent" || value === "image") {
+    return value;
+  }
+  return "agent";
+}
+
+/** Settings sidebar / search category ids. */
+export type CategoryId =
+  | "profile"
+  | "appearance"
+  | "ai"
+  | "image"
+  | "memory"
+  | "search"
+  | "agent"
+  | "mcp"
+  | "skills"
+  | "pinTools"
+  | "workspace"
+  | "history"
+  | "archive"
+  | "usage"
+  | "about"
+  | "provider";
+
+/** Default landing page when settings open without an explicit category. */
+export const DEFAULT_SETTINGS_CATEGORY: CategoryId = "profile";
+
+export interface LspServerConfig {
+  id: string;
+  languages: string[];
+  command: string;
+  args?: string[];
+  enabled?: boolean;
+}
+
+export interface McpServerConfig {
+  id: string;
+  /** Display name from catalog or manual entry; falls back to id in UI. */
+  title?: string;
+  description?: string;
+  command: string;
+  args?: string[];
+  env?: Array<[string, string]>;
+  enabled?: boolean;
+  /** Remote icon URL captured at install time (Smithery / catalog). */
+  iconUrl?: string;
+  /** Stable registry identity, e.g. Smithery `qualifiedName`. */
+  qualifiedName?: string;
+  /** Upstream registry record id (Smithery server.id). */
+  registryId?: string;
+  homepage?: string;
+  /** `smithery` | `catalog` | `manual` */
+  source?: string;
+}
+
+export type ProviderApiProtocol = "chatCompletions" | "responses" | "anthropicMessages";
+
+export type ModelWireProtocol = ProviderApiProtocol;
+
+export const DEFAULT_PROVIDER_API_PROTOCOL: ProviderApiProtocol = "chatCompletions";
+
+export function normalizeProviderApiProtocol(value: unknown): ProviderApiProtocol {
+  if (value === "responses" || value === "anthropicMessages") return value;
+  return "chatCompletions";
+}
+
+export function normalizeModelProtocol(value: unknown): ModelWireProtocol | undefined {
+  if (value === "chatCompletions" || value === "responses" || value === "anthropicMessages") {
+    return value;
+  }
+  return undefined;
+}
+
+export interface CustomProviderConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** Official website used to resolve the provider icon. */
+  websiteUrl?: string;
+  apiKey: string;
+  /** Newline-separated model IDs (legacy comma-separated still accepted when loading). */
+  models: string;
+  /** Newline/comma-separated model IDs the user has switched off; hidden from
+   * pickers and refused at send time. Survives `/models` refetches. */
+  disabledModels?: string;
+  /** Optional preset template id (mimo / zhipu / …) for icons and defaults. */
+  presetId?: string;
+  /** Provider default: Chat Completions, Responses, or Anthropic Messages. */
+  apiProtocol?: ProviderApiProtocol;
+  /** Per-model protocol override. Missing or empty means inherit `apiProtocol`. */
+  modelProtocols?: Record<string, ModelWireProtocol>;
+}
+
+/** User-defined image style template (Settings → Image). */
+export interface ImageStyleTemplate {
+  id: string;
+  name: string;
+  prompt: string;
+  /** Optional data URL used as an image-to-image reference. */
+  exampleImage?: string;
+}
+
+/** A model entry on the built-in DeepSeek provider (id + enabled state + origin). */
+export interface ProviderModelEntry {
+  id: string;
+  /** Switched off by the user; hidden from pickers and refused at send time. */
+  disabled: boolean;
+  /** Added manually by the user rather than fetched from `/models`; survives refetches. */
+  custom: boolean;
+}
+
+export interface AppSettings {
+  colorScheme: ColorScheme;
+  language: AppLanguage;
+  deepseekApiKey: string;
+  deepseekModels: ProviderModelEntry[];
+  memoryEnabled: boolean;
+  mem0ApiKey: string;
+  mem0UserId: string;
+  mem0BaseUrl: string;
+  webSearchEnabled: boolean;
+  webSearchProvider: WebSearchProvider;
+  serperApiKey: string;
+  tavilyApiKey: string;
+  toolApprovalMode: ToolApprovalMode;
+  chatMode: ChatMode;
+  lspEnabled: boolean;
+  lspServers: LspServerConfig[];
+  mcpServers: McpServerConfig[];
+  /** Smithery API key for hosted MCP (query `api_key`, avoids local browser OAuth). */
+  smitheryApiKey: string;
+  /** Built-in skill names opted in for the agent. Empty = none enabled. */
+  enabledBuiltinSkills: string[];
+  opacity: number;
+  chromeFrostedGlass: boolean;
+  chatModel: string;
+  chatModelProvider: string;
+  multimodalModel: string;
+  multimodalModelProvider: string;
+  imageModel: string;
+  imageModelProvider: string;
+  imageProviders: CustomProviderConfig[];
+  imageStyleTemplates: ImageStyleTemplate[];
+  multimodalSplitAnalysis: boolean;
+  /** Use 1M-token context window for compaction / turn budgets. */
+  largeContextEnabled: boolean;
+  reasoningEffort: ReasoningEffort;
+  reasoningLanguage: ReasoningLanguage;
+  /** Pass reasoning_content back on tool-call turns (thinking + tools protocol). */
+  passToolReasoning: boolean;
+  /**
+   * Keep thinking enabled on agent-loop rounds after tools (default on).
+   * Turn off to skip thinking on continuation rounds and save tokens.
+   */
+  continueThinkingAfterTools: boolean;
+  /** Display reasoning content supplied by the model in chat. */
+  showReasoning: boolean;
+  /** detailed = shell/diff inline; compact = fold into process details. */
+  agentWorkDisplay: AgentWorkDisplay;
+  /** Chinese UI font family. Empty = Microsoft YaHei stack. */
+  fontCjk: string;
+  /** Latin UI font family. Empty = Source Sans 3. */
+  fontLatin: string;
+  /** Code / monospace font family. Empty = Cascadia Code stack. */
+  fontMono: string;
+  multiModelCollaboration: boolean;
+  collaborationModels: string[];
+  /** Prefer YAGNI / minimal diffs via an optional system prompt block. */
+  minimalCoding: boolean;
+  zoom: number;
+  /** WebView2 hardware acceleration. A full app restart is required to apply changes. */
+  hardwareAccelerationEnabled: boolean;
+  primaryHotkey: string;
+  /** Listen for double-tap primary shortcut globally. */
+  primaryHotkeyEnabled: boolean;
+  secondaryHotkey: string;
+  /** Listen for secondary chord shortcut globally. */
+  secondaryHotkeyEnabled: boolean;
+  customProviders: CustomProviderConfig[];
+  /** Show AI button on PixPin pin windows. */
+  pixpinPinAiEnabled: boolean;
+  /** Show AI button on Snipaste pin windows. */
+  snipastePinAiEnabled: boolean;
+  /** First-run welcome wizard completed. */
+  onboardingCompleted: boolean;
+  /** User-defined or Agent-created custom themes. */
+  customThemes: CustomThemeConfig[];
+  /** User custom background (global / fallback for default themes). */
+  customBackground?: ThemeBackgroundConfig;
+}
+
+export interface AppSettingsPatch {
+  colorScheme?: ColorScheme;
+  language?: AppLanguage;
+  deepseekApiKey?: string;
+  deepseekModels?: ProviderModelEntry[];
+  memoryEnabled?: boolean;
+  mem0ApiKey?: string;
+  mem0UserId?: string;
+  mem0BaseUrl?: string;
+  webSearchEnabled?: boolean;
+  webSearchProvider?: WebSearchProvider;
+  serperApiKey?: string;
+  tavilyApiKey?: string;
+  toolApprovalMode?: ToolApprovalMode;
+  chatMode?: ChatMode;
+  lspEnabled?: boolean;
+  lspServers?: LspServerConfig[];
+  mcpServers?: McpServerConfig[];
+  smitheryApiKey?: string;
+  enabledBuiltinSkills?: string[];
+  opacity?: number;
+  chromeFrostedGlass?: boolean;
+  chatModel?: string;
+  chatModelProvider?: string;
+  multimodalModel?: string;
+  multimodalModelProvider?: string;
+  imageModel?: string;
+  imageModelProvider?: string;
+  imageProviders?: CustomProviderConfig[];
+  imageStyleTemplates?: ImageStyleTemplate[];
+  multimodalSplitAnalysis?: boolean;
+  largeContextEnabled?: boolean;
+  reasoningEffort?: ReasoningEffort;
+  reasoningLanguage?: ReasoningLanguage;
+  passToolReasoning?: boolean;
+  continueThinkingAfterTools?: boolean;
+  showReasoning?: boolean;
+  agentWorkDisplay?: AgentWorkDisplay;
+  fontCjk?: string;
+  fontLatin?: string;
+  fontMono?: string;
+  multiModelCollaboration?: boolean;
+  collaborationModels?: string[];
+  minimalCoding?: boolean;
+  allowOutsideWorkspaceWrites?: boolean;
+  restrictedShell?: boolean;
+  shellTimeoutSecs?: number;
+  shellTimeoutMigrated?: boolean;
+  shellStallTimeoutSecs?: number;
+  autoVerifyAfterEdits?: boolean;
+  pendingRestrictedShellUpgradeNotice?: boolean;
+  zoom?: number;
+  hardwareAccelerationEnabled?: boolean;
+  primaryHotkey?: string;
+  primaryHotkeyEnabled?: boolean;
+  secondaryHotkey?: string;
+  secondaryHotkeyEnabled?: boolean;
+  customProviders?: CustomProviderConfig[];
+  pixpinPinAiEnabled?: boolean;
+  snipastePinAiEnabled?: boolean;
+  onboardingCompleted?: boolean;
+  customThemes?: CustomThemeConfig[];
+  customBackground?: ThemeBackgroundConfig | null;
+}
+
+export interface ModelSelection {
+  id: string;
+  provider: string;
+}
+
+export interface SelectOption<T extends string> {
+  value: T;
+  label: Partial<Record<AppLanguage, string>> & Pick<Record<AppLanguage, string>, "en-US">;
+}
+
+export function localizedOptionLabel<T extends string>(
+  option: SelectOption<T>,
+  language: AppLanguage,
+) {
+  return option.label[language] ?? option.label["en-US"];
+}
+
+export const languageOptions: SelectOption<AppLanguage>[] = [
+  {
+    value: "zh-CN",
+    label: {
+      "zh-CN": "简体中文",
+      "en-US": "Simplified Chinese",
+      "ja-JP": "簡体字中国語",
+      "ru-RU": "Китайский (упрощенный)",
+      "de-DE": "Chinesisch (vereinfacht)",
+      "fr-FR": "Chinois simplifié",
+      "ko-KR": "중국어(간체)",
+    },
+  },
+  {
+    value: "en-US",
+    label: { "zh-CN": "English", "en-US": "English" },
+  },
+  { value: "ja-JP", label: { "en-US": "Japanese", "ja-JP": "日本語" } },
+  { value: "ru-RU", label: { "en-US": "Russian", "ru-RU": "Русский" } },
+  { value: "de-DE", label: { "en-US": "German", "de-DE": "Deutsch" } },
+  { value: "fr-FR", label: { "en-US": "French", "fr-FR": "Français" } },
+  { value: "ko-KR", label: { "en-US": "Korean", "ko-KR": "한국어" } },
+];
+
+export const reasoningEffortOptions: SelectOption<ReasoningEffort>[] = [
+  {
+    value: "disabled",
+    label: {
+      "zh-CN": "关闭",
+      "en-US": "Disabled",
+      "ja-JP": "無効",
+      "ru-RU": "Откл.",
+      "de-DE": "Aus",
+      "fr-FR": "Désactivé",
+      "ko-KR": "끄기",
+    },
+  },
+  {
+    value: "none",
+    label: {
+      "zh-CN": "无",
+      "en-US": "None",
+      "ja-JP": "なし",
+      "ru-RU": "Нет",
+      "de-DE": "Keine",
+      "fr-FR": "Aucun",
+      "ko-KR": "없음",
+    },
+  },
+  {
+    value: "minimal",
+    label: {
+      "zh-CN": "最小",
+      "en-US": "Minimal",
+      "ja-JP": "最小",
+      "ru-RU": "Мин.",
+      "de-DE": "Minimal",
+      "fr-FR": "Minimal",
+      "ko-KR": "최소",
+    },
+  },
+  {
+    value: "low",
+    label: {
+      "zh-CN": "低",
+      "en-US": "Low",
+      "ja-JP": "低",
+      "ru-RU": "Низкая",
+      "de-DE": "Niedrig",
+      "fr-FR": "Faible",
+      "ko-KR": "낮음",
+    },
+  },
+  {
+    value: "medium",
+    label: {
+      "zh-CN": "中",
+      "en-US": "Medium",
+      "ja-JP": "中",
+      "ru-RU": "Средняя",
+      "de-DE": "Mittel",
+      "fr-FR": "Moyen",
+      "ko-KR": "중간",
+    },
+  },
+  {
+    value: "high",
+    label: {
+      "zh-CN": "高",
+      "en-US": "High",
+      "ja-JP": "高",
+      "ru-RU": "Высокая",
+      "de-DE": "Hoch",
+      "fr-FR": "Élevé",
+      "ko-KR": "높음",
+    },
+  },
+  {
+    value: "xhigh",
+    label: {
+      "zh-CN": "极高",
+      "en-US": "xHigh",
+      "ja-JP": "極高",
+      "ru-RU": "Очень выс.",
+      "de-DE": "Sehr hoch",
+      "fr-FR": "Très élevé",
+      "ko-KR": "매우 높음",
+    },
+  },
+  {
+    value: "max",
+    label: {
+      "zh-CN": "最高",
+      "en-US": "Max",
+      "ja-JP": "最大",
+      "ru-RU": "Макс.",
+      "de-DE": "Maximal",
+      "fr-FR": "Maximum",
+      "ko-KR": "최대",
+    },
+  },
+];
+
+export const reasoningLanguageOptions: SelectOption<ReasoningLanguage>[] = [
+  {
+    value: "auto",
+    label: {
+      "zh-CN": "自动",
+      "en-US": "Auto",
+      "ja-JP": "自動",
+      "ru-RU": "Авто",
+      "de-DE": "Automatisch",
+      "fr-FR": "Automatique",
+      "ko-KR": "자동",
+    },
+  },
+  {
+    value: "zh",
+    label: {
+      "zh-CN": "中文",
+      "en-US": "Chinese",
+      "ja-JP": "中国語",
+      "ru-RU": "Китайский",
+      "de-DE": "Chinesisch",
+      "fr-FR": "Chinois",
+      "ko-KR": "중국어",
+    },
+  },
+  {
+    value: "en",
+    label: { "zh-CN": "English", "en-US": "English" },
+  },
+];
+
+export const webSearchProviderOptions: SelectOption<WebSearchProvider>[] = [
+  {
+    value: "serper",
+    label: { "zh-CN": "Serper", "en-US": "Serper" },
+  },
+  {
+    value: "tavily",
+    label: { "zh-CN": "Tavily", "en-US": "Tavily" },
+  },
+];
+
+export const toolApprovalModeOptions: SelectOption<ToolApprovalMode>[] = [
+  {
+    value: "ask",
+    label: { "zh-CN": "只读", "en-US": "Read-only" },
+  },
+  {
+    value: "auto",
+    label: { "zh-CN": "工作区可写", "en-US": "Workspace-write" },
+  },
+  {
+    value: "alwaysAllow",
+    label: { "zh-CN": "完全访问", "en-US": "Full-access" },
+  },
+];
+
+export const agentWorkDisplayOptions: SelectOption<AgentWorkDisplay>[] = [
+  {
+    value: "detailed",
+    label: { "zh-CN": "详细显示", "en-US": "Detailed" },
+  },
+  {
+    value: "compact",
+    label: { "zh-CN": "轻量显示", "en-US": "Compact" },
+  },
+];
+
+export const zoomOptions: SelectOption<string>[] = [
+  {
+    value: "80",
+    label: { "zh-CN": "80%", "en-US": "80%" },
+  },
+  {
+    value: "90",
+    label: { "zh-CN": "90%", "en-US": "90%" },
+  },
+  {
+    value: "100",
+    label: {
+      "zh-CN": "100% (默认)",
+      "en-US": "100% (Default)",
+      "ja-JP": "100%（既定）",
+      "ru-RU": "100% (по умолчанию)",
+      "de-DE": "100% (Standard)",
+      "fr-FR": "100 % (par défaut)",
+      "ko-KR": "100% (기본값)",
+    },
+  },
+  {
+    value: "110",
+    label: { "zh-CN": "110%", "en-US": "110%" },
+  },
+  {
+    value: "120",
+    label: { "zh-CN": "120%", "en-US": "120%" },
+  },
+  {
+    value: "130",
+    label: { "zh-CN": "130%", "en-US": "130%" },
+  },
+  {
+    value: "140",
+    label: { "zh-CN": "140%", "en-US": "140%" },
+  },
+  {
+    value: "150",
+    label: { "zh-CN": "150%", "en-US": "150%" },
+  },
+  {
+    value: "175",
+    label: { "zh-CN": "175%", "en-US": "175%" },
+  },
+  {
+    value: "200",
+    label: { "zh-CN": "200%", "en-US": "200%" },
+  },
+];

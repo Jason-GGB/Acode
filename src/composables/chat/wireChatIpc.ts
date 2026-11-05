@@ -1,0 +1,410 @@
+import { listen } from "@tauri-apps/api/event";
+import {
+  listenChatContextNotice,
+  listenChatDelta,
+  listenChatError,
+  listenChatFinished,
+  listenChatReasoning,
+  listenChatSessionTitleUpdated,
+  listenChatStarted,
+  listenChatStatus,
+  listenChatTokenUsage,
+  listenChatUserContent,
+  listenSettingsChanged,
+  listenToolFinished,
+  listenToolStarted,
+  listenTaskListUpdated,
+  listenPlanUpdated,
+  listenPlanModeChanged,
+  listenFileOffer,
+  listenUrlOffer,
+} from "@/services/ipc";
+import { normalizeToolActivityEvent, resolveSessionId } from "@/services/chat/normalize";
+import { parseContextCompactedStatus } from "@/services/chat/compactMarker";
+import { isPluginAgentSessionId } from "@/services/chat/pluginSession";
+import { createRafBatch } from "@/services/chat/rafBatch";
+import { recordToolActivityUsage } from "@/services/usage/resourceUsage";
+import { createLogger } from "@/services/logger";
+import { planApprovePrompt } from "@/services/chat/planProposal";
+import { useChatStore } from "@/stores/chat";
+import { useChatSessionsStore } from "@/stores/chatSessions";
+import { useSettingStore } from "@/stores/setting";
+import type {
+  ChatContextNoticeEvent,
+  ChatDeltaEvent,
+  ChatErrorEvent,
+  ChatFinishedEvent,
+  ChatReasoningEvent,
+  ChatStatusEvent,
+  ChatTokenUsageEvent,
+  ChatUserContentEvent,
+} from "@/types/chat";
+
+type StreamBatchUpdate = {
+  sessionId: string;
+  messageId: string;
+  contentDelta?: string;
+  reasoningDelta?: string;
+};
+
+export interface ChatIpcDeps {
+  streamUpdateIntervalMs?: number;
+  chatStore: ReturnType<typeof useChatStore>;
+  settingStore: ReturnType<typeof useSettingStore>;
+}
+
+/**
+ * Wire every chat-related IPC event (stream deltas, tool activity, plan gate,
+ * file/url offers, remote compose sync) into the chat store. Extracted from
+ * `main.ts` bootstrap so the entry point stays about window bootstrapping.
+ */
+export async function wireChatIpc({
+  chatStore,
+  settingStore,
+  streamUpdateIntervalMs = 0,
+}: ChatIpcDeps): Promise<void> {
+  const log = createLogger("chatIpc");
+  const sessionsStore = useChatSessionsStore();
+  const overlayDraftSessionId = () => sessionsStore.overlayDraftSessionId;
+  const sessionKnown = (sessionId: string) =>
+    Boolean(
+      sessionsStore.sessions[sessionId] ||
+      sessionId === overlayDraftSessionId() ||
+      isPluginAgentSessionId(sessionId),
+    );
+
+  // Coalesce high-frequency stream deltas onto animation frames.
+  const streamBatch = createRafBatch<StreamBatchUpdate>((batch) => {
+    chatStore.applyStreamDeltas(
+      batch.map((item) => ({
+        ...item,
+        fallbackSessionId: overlayDraftSessionId(),
+      })),
+    );
+  }, streamUpdateIntervalMs);
+
+  await listenSettingsChanged((settings) => {
+    settingStore.applySettingsBroadcast(settings);
+  });
+
+  await listenChatStarted((payload) => {
+    const sId = payload.sessionId;
+    if (!sId) {
+      return;
+    }
+    // Apply for overlay drafts and workbench sessions alike — remote Companion
+    // sends never touch overlayDraftSessionId, but still need sending/sidebar state.
+    chatStore.applyChatStarted(payload);
+    void sessionsStore.refreshSummaries();
+  });
+
+  await listenChatSessionTitleUpdated((payload) => {
+    if (payload.sessionId && payload.title) {
+      sessionsStore.patchSummary(payload.sessionId, { preview: payload.title });
+    }
+    void sessionsStore.refreshSummaries();
+  });
+
+  await listenChatContextNotice((payload) => {
+    const event = payload as ChatContextNoticeEvent & {
+      session_id?: string;
+      folded_messages?: number;
+      estimated_tokens?: number;
+      context_window_tokens?: number;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      const estimatedTokens = event.estimatedTokens ?? event.estimated_tokens;
+      const contextWindowTokens = event.contextWindowTokens ?? event.context_window_tokens;
+      const prev = chatStore.contextUsage[sId];
+      if (
+        typeof estimatedTokens === "number" &&
+        estimatedTokens > 0 &&
+        typeof contextWindowTokens === "number" &&
+        contextWindowTokens > 0
+      ) {
+        chatStore.setContextUsage(sId, {
+          ...(prev ?? { usageRatio: 0, estimatedTokens: 0, contextWindowTokens: 0 }),
+          usageRatio: event.usageRatio,
+          estimatedTokens,
+          contextWindowTokens,
+        });
+      } else if (typeof event.usageRatio === "number") {
+        chatStore.setContextUsage(sId, {
+          ...(prev ?? { usageRatio: 0, estimatedTokens: 0, contextWindowTokens: 0 }),
+          usageRatio: event.usageRatio,
+        });
+      }
+      // Compacted notices only refresh the usage ring. The in-thread
+      // indicator is a transient activity label, not a history divider.
+    }
+  });
+
+  await listenChatDelta((payload) => {
+    const event = payload as ChatDeltaEvent & {
+      session_id?: string;
+      message_id?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      streamBatch.push({
+        sessionId: sId,
+        messageId: event.messageId ?? event.message_id ?? "",
+        contentDelta: event.delta,
+      });
+    }
+  });
+
+  await listenChatReasoning((payload) => {
+    const event = payload as ChatReasoningEvent & {
+      session_id?: string;
+      message_id?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      streamBatch.push({
+        sessionId: sId,
+        messageId: event.messageId ?? event.message_id ?? "",
+        reasoningDelta: event.content,
+      });
+    }
+  });
+
+  await listenChatStatus((payload) => {
+    const event = payload as ChatStatusEvent & {
+      session_id?: string;
+      message_id?: string;
+      kind?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      if (event.kind?.startsWith("stream_retry")) {
+        streamBatch.drain();
+      }
+      const compacted = parseContextCompactedStatus(event.kind ?? "");
+      if (
+        compacted &&
+        compacted.usageRatio != null &&
+        compacted.estimatedTokens &&
+        compacted.contextWindowTokens
+      ) {
+        chatStore.setContextUsage(sId, {
+          ...(chatStore.contextUsage[sId] ?? {
+            usageRatio: 0,
+            estimatedTokens: 0,
+            contextWindowTokens: 0,
+          }),
+          usageRatio: compacted.usageRatio,
+          estimatedTokens: compacted.estimatedTokens,
+          contextWindowTokens: compacted.contextWindowTokens,
+        });
+      }
+      chatStore.setActivityStatus(
+        sId,
+        event.messageId ?? event.message_id ?? "",
+        event.kind ?? "",
+        overlayDraftSessionId(),
+        event.snapshot,
+      );
+    }
+  });
+
+  await listenChatUserContent((payload) => {
+    const event = payload as ChatUserContentEvent & {
+      session_id?: string;
+      message_id?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      chatStore.patchMessageContent(
+        sId,
+        event.messageId ?? event.message_id ?? "",
+        event.content,
+        overlayDraftSessionId(),
+      );
+    }
+  });
+
+  await listenChatFinished((payload) => {
+    streamBatch.drain();
+    const event = payload as ChatFinishedEvent & {
+      session_id?: string;
+      message_id?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      chatStore.finishMessage(
+        sId,
+        event.messageId ?? event.message_id ?? "",
+        event.content,
+        overlayDraftSessionId(),
+        event.reasoning,
+      );
+    }
+    // 本轮结束后（含用户停止）自动发出暂存消息。
+    if (sId) {
+      void chatStore.flushStaged(sId);
+    }
+  });
+
+  await listenChatTokenUsage((payload) => {
+    const event = payload as ChatTokenUsageEvent & {
+      session_id?: string;
+      message_id?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    const cacheRead = event.usage?.cacheReadTokens;
+    if (!sId || cacheRead == null || !Number.isFinite(cacheRead)) {
+      return;
+    }
+    chatStore.addPromptCacheUsage(
+      sId,
+      {
+        inputTokens: event.usage.inputTokens ?? 0,
+        cacheReadTokens: cacheRead,
+        model: event.model,
+      },
+      event.messageId ?? event.message_id,
+    );
+  });
+
+  await listenChatError((payload) => {
+    streamBatch.drain();
+    const event = payload as ChatErrorEvent & {
+      session_id?: string;
+      message_id?: string;
+    };
+    const sId = resolveSessionId(event.sessionId, event.session_id);
+    if (sId && sessionKnown(sId)) {
+      chatStore.failMessage(
+        sId,
+        event.messageId ?? event.message_id ?? "",
+        event.message,
+        overlayDraftSessionId(),
+      );
+      void chatStore.flushStaged(sId);
+    }
+  });
+
+  const handleToolActivity = (payload: unknown, options?: { recordUsage?: boolean }) => {
+    streamBatch.drain();
+    const normalized = normalizeToolActivityEvent(
+      payload as Parameters<typeof normalizeToolActivityEvent>[0],
+    );
+    if (!normalized) {
+      return;
+    }
+    if (options?.recordUsage && normalized.activity.status === "running") {
+      recordToolActivityUsage(normalized.activity.toolName, normalized.activity.arguments);
+    }
+    const { sessionId, messageId, activity } = normalized;
+    if (sessionId && (sessionsStore.sessions[sessionId] || sessionId === overlayDraftSessionId())) {
+      chatStore.upsertToolActivity(sessionId, messageId, activity, overlayDraftSessionId());
+    }
+  };
+
+  await listenToolStarted((payload) => handleToolActivity(payload, { recordUsage: true }));
+  await listenToolFinished(handleToolActivity);
+
+  await listenFileOffer((payload) => {
+    chatStore.applyFileOffer(payload, overlayDraftSessionId());
+  });
+  await listenUrlOffer((payload) => {
+    chatStore.applyUrlOffer(payload, overlayDraftSessionId());
+  });
+
+  await listenTaskListUpdated((payload) => {
+    const sessionId = resolveSessionId(payload.sessionId, overlayDraftSessionId());
+    if (!sessionId) return;
+    chatStore.setSessionTasks(sessionId, payload.tasks ?? []);
+  });
+
+  await listenPlanUpdated((payload) => {
+    const sessionId = resolveSessionId(payload.sessionId, overlayDraftSessionId());
+    if (!sessionId) return;
+    chatStore.setSessionPlan(sessionId, {
+      path: payload.path,
+      content: payload.content,
+    });
+  });
+
+  await listenPlanModeChanged((payload) => {
+    const sessionId = resolveSessionId(payload.sessionId, overlayDraftSessionId());
+    if (!sessionId) return;
+    const active = Boolean(payload.active);
+    const source = payload.source === "auto" ? "auto" : "manual";
+    chatStore.setSessionPlanMode(sessionId, active);
+    chatStore.setSessionPlanTrigger(sessionId, active ? source : "manual");
+    if (active && payload.source === "request") {
+      chatStore.setCompose(sessionId, { chatMode: "plan" });
+    }
+  });
+
+  // Companion ↔ desktop compose / plan sync (Remote Gateway).
+  try {
+    await listen<{
+      sessionId?: string;
+      compose?: {
+        chatMode?: "ask" | "agent" | "plan" | "image";
+        toolApprovalMode?: "ask" | "auto" | "alwaysAllow";
+        chatModel?: string;
+        chatModelProvider?: string;
+      };
+      source?: string;
+    }>("remote-compose-changed", (event) => {
+      const payload = event.payload;
+      const sessionId = payload.sessionId;
+      if (!sessionId || !payload.compose) {
+        return;
+      }
+      chatStore.applyComposeFromRemote(sessionId, {
+        chatMode: payload.compose.chatMode,
+        toolApprovalMode: payload.compose.toolApprovalMode,
+        chatModel: payload.compose.chatModel,
+        chatModelProvider: payload.compose.chatModelProvider,
+      });
+    });
+    await listen<{ sessionId?: string; messages?: string[] }>("remote-staged-changed", (event) => {
+      const sessionId = event.payload.sessionId;
+      if (!sessionId) return;
+      // Events can arrive late or out of order across windows. Treat them as
+      // invalidations and re-read the authoritative queue after pending writes.
+      void chatStore.refreshStagedFromRemote(sessionId);
+    });
+    await listen<{ sessionId?: string }>("remote-compose-needed", (event) => {
+      const sessionId = event.payload.sessionId;
+      if (!sessionId) {
+        return;
+      }
+      chatStore.ensureCompose(sessionId);
+    });
+    await listen<{ sessionId?: string }>("remote-session-rewound", (event) => {
+      const sessionId = event.payload.sessionId;
+      if (!sessionId) {
+        return;
+      }
+      // Companion rolled the turn back; mirror the desktop rewind's history reload.
+      chatStore.clearSending(sessionId);
+      void chatStore.loadHistory(sessionId);
+    });
+    await listen<{ sessionId?: string }>("remote-plan-approve", (event) => {
+      const sessionId = event.payload.sessionId;
+      if (!sessionId) {
+        return;
+      }
+      // Mirror desktop "批准并执行": leave plan gate and resume execution.
+      // Approval text is persisted into history / Companion inbox.
+      const planPath = chatStore.sessionPlans[sessionId]?.path;
+      void chatStore
+        .send(planApprovePrompt(settingStore.language, planPath), sessionId, {
+          resumePlan: true,
+          skipAutoPlan: true,
+        })
+        .then(() => {
+          chatStore.setCompose(sessionId, { chatMode: "agent" });
+        });
+    });
+  } catch (error) {
+    log.warn("remote compose listeners unavailable", error);
+  }
+}

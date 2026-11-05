@@ -1,0 +1,876 @@
+# Acode 技术架构总览
+
+本文描述 Acode 的逻辑结构、依赖约束、控制流、持久化与编排，面向需要定位代码路径、评估变更影响的贡献者。
+
+<p>
+  <a href="./architecture-overview.md">English</a> ·
+  <a href="./architecture-overview.zh-CN.md">简体中文</a>
+</p>
+
+|            |                                    |
+| ---------- | ---------------------------------- |
+| **产品**   | Acode — 将你的工作&疑问随手交给Acode |
+| **版本**   | v0.2.34                            |
+| **运行时** | Tauri 2（WebView2 + Rust）         |
+| **界面**   | Vue 3 · Vite · Pinia · TypeScript  |
+| **领域**   | Rust（`src-tauri/src`）            |
+
+**相关文档：** [发布](./release.zh-CN.md) · [文档索引](./README.zh-CN.md) · [Companion（安卓）](https://github.com/rururunu/AnyaAndroid/blob/main/docs/ARCHITECTURE.zh-CN.md)
+
+---
+
+## 1. 范围
+
+**范围内**
+
+- 进程 / 窗口拓扑
+- 分层边界与允许的依赖方向
+- 主聊天请求路径（UI → 领域 → Provider → 工具 → UI 事件）
+- Agent 回合编排与策略钩子（Ask / Agent / 计划门禁 / Image 模式）
+- 持久化（SQLite、journal、work timeline）
+- 前端流式投影与会话模型
+- 扩展点（Provider、工具、Skills、MCP）
+- Companion / Remote Gateway（配对、局域网 vs 隧道、线路协议、文件 HTTP）
+
+**范围外**
+
+- 各 Provider 的 HTTP 协议细节
+- 单个工具的参数契约
+- Token 色值 / 视觉打磨（主题**应用路径**在范围内）
+
+---
+
+## 2. 系统上下文
+
+Acode 以**单个原生进程**托管多个 WebView 窗口。Rust 宿主负责 OS 集成；WebView 负责呈现与本地 UI 状态。
+
+```mermaid
+flowchart LR
+  User((用户)) -->|热键 / 托盘 / 输入| Host[Acode 进程]
+  Phone[Acode Companion] -->|WS /remote/v1 · HTTP /f /p| Host
+  IDE[IDE 插件] -->|上下文推送| Host
+  Browser[Chrome / Edge 扩展] -->|网页选中文字 · 本地回环| Host
+  Host -->|Skills + Deno| Office[Word / Excel / PPT]
+  Host -->|HTTPS SSE / REST| LLM[模型服务商]
+  Host -->|HTTPS / stdio| Aux[MCP · 搜索 · mem0]
+  Host --> Disk[(SQLite · 设置 · 索引 · 模型)]
+```
+
+| 参与方            | 交互方式                                                               |
+| ----------------- | ---------------------------------------------------------------------- |
+| 用户              | 全局热键、托盘、输入栏、Diff 审查、工作台内嵌设置                      |
+| Acode Companion    | 安卓远程；局域网 `ws` 或 Cloudflare `wss`；文件走 HTTP Range `/f/`     |
+| IDE 插件          | 尽力而为的本地上下文推送（文件、工作区、选区）                         |
+| 浏览器选区桥接    | 可选扩展将网页选中文字传给本机程序；不采集浏览历史                     |
+| Microsoft Office  | 保存文件技能 + 内置 Deno/JavaScript 文档运行时                         |
+| 模型服务商        | 鉴权 HTTPS SSE；支持 Chat Completions、Responses 或 Anthropic Messages |
+| MCP / 搜索 / mem0 | 可选；在设置中显式启用                                                 |
+| 本地磁盘          | 聊天库、设置、`.acode/index`、嵌入模型缓存、更新公钥、检查点            |
+
+---
+
+## 3. 逻辑架构
+
+### 3.1 分层
+
+依赖**只允许向下**。跨层越界调用（例如 Vue store 直连 Tauri API、`commands/` 直接发 Provider HTTP）视为缺陷。
+
+```mermaid
+flowchart TB
+  subgraph Presentation["L1 Presentation"]
+    Win["窗口表面<br/>workbench（含设置）· overlay · preview"]
+    UI["Vue layouts / components / composables"]
+    Store["Pinia stores"]
+  end
+
+  subgraph Bridge["L2 Application bridge"]
+    FeIpc["src/services/ipc<br/>invoke + event listeners"]
+    Cmd["src-tauri/commands<br/>thin #[tauri::command]"]
+    Bus["EventBus · adapters/tauri_events"]
+  end
+
+  subgraph Domain["L3 Domain core"]
+    Chat["core/chat<br/>ChatService · StreamManager · AgentRunner"]
+    AgentShell["core/agent<br/>AgentRuntime · run lifecycle"]
+    Ai["core/ai<br/>providers"]
+    Tools["core/tools<br/>registry · approval · plan gate · sandbox"]
+    Ctx["core/context · workspace · rules · token"]
+    Persist["conversation_manager · db · journal"]
+  end
+
+  subgraph Adapters["L4 Adapters"]
+    Rt["crate::runtime<br/>git · search · browser · shell"]
+    OfficeCore["core/tools/skills · core/mcp · core/lsp"]
+    Remote["core/remote<br/>gateway · upload · download · preview"]
+    Svc["services/<br/>window · hotkey · settings · oauth · pin_badge"]
+  end
+
+  Win --> UI --> Store --> FeIpc
+  FeIpc <-->|IPC| Cmd
+  Cmd --> Chat
+  Svc --> Chat
+  Chat --> AgentShell
+  AgentShell --> Chat
+  Chat --> Ai
+  Chat --> Tools
+  Chat --> Ctx
+  Chat --> Persist
+  Tools --> Rt
+  Tools --> OfficeCore
+  Remote --> Chat
+  Bus --> FeIpc
+  Chat --> Bus
+```
+
+| 层              | 位置                                                          | 职责                                                     | 禁止                     |
+| --------------- | ------------------------------------------------------------- | -------------------------------------------------------- | ------------------------ |
+| L1 Presentation | `src/{layouts,components,composables,stores,pages}`           | 渲染、本地 UX 状态、RAF 合并流式增量                     | 调用 Provider 或执行工具 |
+| L2 Bridge       | `src/services/ipc`、`commands/`、`adapters/`                  | 序列化 IPC DTO；将 `BusEvent` 投影为 Tauri emit          | 承载业务策略             |
+| L3 Domain       | `core/{chat,ai,tools,agent,context,…}`                        | 聊天生命周期、Agent 循环、工具、提示词、持久化           | 依赖 Vue / DOM           |
+| L4 Adapters     | `runtime/`、`services/`、`core/{tools/skills,mcp,lsp,remote}` | OS、文档脚本、HTTP 客户端、MCP 传输、Companion WS / HTTP | 驱动 Agent 主循环        |
+
+### 3.2 前端依赖规则
+
+```text
+UI → composables → stores → services → services/ipc → Tauri
+                 ↘ services ↗
+```
+
+`stores` 与 `services` **不得** import `components` / `layouts` / `pages`。
+聊天图片相关能力（`saveChatImage`、`localImageSrc`、`imageGenMode` 等）因此放在
+`services/chat/`，UI 卡片只消费、不反向依赖。
+
+### 3.3 后端依赖规则
+
+```text
+lib / main
+  → commands（IPC 门面）
+  → core::*（领域）
+  → runtime / document scripts / mcp（适配）
+services（window、hotkey、settings）→ 按需依赖 core
+```
+
+`commands/*` 只做入参校验与转发；编排归属 `ChatService` 与 `AgentRuntime`。
+
+---
+
+## 4. 部署 / 进程视图
+
+一个 OS 进程，多个 WebView label。领域状态在进程内共享。
+
+```mermaid
+flowchart TB
+  subgraph Process["Acode.exe"]
+    Rust["Rust 宿主<br/>hotkey · tray · Deno · SQLite · AgentRuntime · Gateway"]
+    WV1["WebView: workbench<br/>对话 · 审查 · 内嵌设置"]
+    WV2["WebView: overlay"]
+    WV4["WebView: image-preview"]
+  end
+
+  Phone[Acode Companion]
+
+  WV1 <-->|invoke / events| Rust
+  WV2 <-->|invoke / events| Rust
+  WV4 <-->|invoke / events| Rust
+  Phone -->|ws / wss /remote/v1<br/>HTTP /f /p| Rust
+```
+
+| 表面      | Label               | 职责                                         |
+| --------- | ------------------- | -------------------------------------------- |
+| Workbench | `workbench`         | 会话、审查、**内嵌设置**（没有独立设置窗口） |
+| Overlay   | `overlay*`          | 悬浮输入；临时快速提问或绑定工作区           |
+| Preview   | `overlay-preview-*` | 图片预览窗口                                 |
+
+托盘 **设置** 会显示工作台并发出 `open-workbench-settings`。可选 **毛玻璃顶栏与侧栏**（`services/workbench_glass.rs`）走 DWM backdrop；对话区保持不透明。最大化 / 全屏时关闭原生模糊。
+
+### 外观（浅色 / 深色）
+
+设置只提供 **浅色** 与 **深色**。外观由 `html[data-theme="light"|"dark"]` 加上
+`src/services/theme/themes.css` 的 CSS 变量决定。文档的 `color-scheme` 保持
+**`only light`**，避免 WebView2 反转图片和原生绘制；深色只来自 token。
+`ThemeService.applyThemeAppearance` 是唯一应用入口（不再使用 `.dark` class）。
+毛玻璃时 html 用 `color-scheme: normal` 让桌面透过，body 仍为 `only light`。
+旧调色板 id 在 `normalizeThemeId` 中映射到 light/dark。
+
+工作台窗口圆角为 `--peek-window-radius`（16px）。Windows 上 `workbench_glass.rs`
+设置 `DWMWCP_DONOTROUND`，并用 `SetWindowRgn` 把 HWND 裁成同一半径（最大化时清除）。
+吉祥物（`components/icons/MascotFace.vue`）是内联 SVG 的圆润小团子，身体填充 `--peek-text`、眼睛 `--peek-bg`；会跟随鼠标、眨眼，并通过 `state` prop 表现 agent 状态、`tool` prop 表现当前聊天模式。图标 / 托盘等静态资源在 `public/mascot/` 与 `src-tauri/icons/`。
+
+会话标识（`session_id`）由 Rust 会话存储拥有。Overlay 与 Workbench 可同时附着到**同一**会话。Companion 经网关附着并投影同一存储——它不拥有第二套 Agent。
+
+### 4.1 Remote Gateway 与 Companion
+
+手机应用：[AnyaAndroid](https://github.com/rururunu/AnyaAndroid)。桌面代码：`src-tauri/src/core/remote/`。Companion 是 **投影 + RPC 客户端**；工具、SQLite 与模型密钥仍在本进程。
+
+```mermaid
+flowchart TB
+  subgraph Phone["Acode Companion"]
+    UI[Compose UI]
+    Client[RemoteGatewayClient]
+    UI --> Client
+  end
+
+  subgraph Path["可达性"]
+    LAN["同一 Wi-Fi<br/>ws://lanHost:8787/remote/v1"]
+    CF["外出<br/>wss://*.trycloudflare.com/remote/v1"]
+  end
+
+  subgraph Desktop["Acode.exe"]
+    GW[http_proxy.rs :8787]
+    Tunnel[cloudflared Quick Tunnel]
+    Pair[pairing.rs]
+    Bridge[bridge.rs → EventBus]
+    Chat[ChatService / AgentRunner]
+    GW --> Pair
+    GW --> Bridge
+    Bridge --> Chat
+    Tunnel --> GW
+  end
+
+  Client -->|"1. 局域网优先"| LAN --> GW
+  Client -->|"2. 公网回退"| CF --> Tunnel
+```
+
+同一端口 **8787** 拆成三条 HTTP 表面：
+
+```mermaid
+flowchart TB
+  TCP[TCP :8787] --> Disp[http_proxy::dispatch]
+  Disp -->|Upgrade /remote/v1| WS[Companion WebSocket]
+  Disp -->|GET /f/:id| DL[Range 下载票据]
+  Disp -->|/p/:id/ cookie Referer| PX[预览反向代理]
+```
+
+```mermaid
+sequenceDiagram
+  participant D as 桌面
+  participant P as Companion
+  D->>D: 配对令牌 + 二维码（acode://pair）
+  P->>D: WebSocket /remote/v1
+  P->>D: hello deviceId + credential
+  D-->>P: hello.ok
+  D-->>P: event session.snapshot
+  P->>D: chat.send / approval.respond / file.upload.*
+  D-->>P: event（增量、审批、file.offer）
+  P->>D: file.download.begin
+  D-->>P: url /f/:id size name
+  P->>D: GET /f/:id Range
+  D-->>P: 206 Partial Content
+```
+
+| 主题                 | 约定                                                                                                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 路径 / 端口          | `/remote/v1`，端口 **8787**（局域网 `ws`，隧道 `wss`）                                                                                                                        |
+| 鉴权                 | 短时二维码令牌，随后存储设备凭证                                                                                                                                              |
+| 保活                 | 应用层 `ping` / `pong`（代理常丢原生 WS ping）                                                                                                                                |
+| 手机 → 桌面          | 分片 `file.upload.*`（JSON+b64 **或** 二进制 WS 帧），可乱序，512KB，上限 **500MB**                                                                                           |
+| 桌面 → 手机          | 卡片 → `file.download.begin` → HTTP `/f/{id}` `Range`（票据 10 分钟）。旧路径：`workspace.readFile` `mode=download` 分片                                                      |
+| 预览                 | 同一网关上的 HTTP `/p/{id}/` 反向代理（cookie / Referer 回退）                                                                                                                |
+| 未绑定手机           | FAB / `chat.send` 无 `workspaceId` 视为快速提问——**不得**继承桌面当前工作区                                                                                                   |
+| Companion ≥0.1.8 RPC | `session.rename`、`workspace.pin` / `workspace.update`、`workspace.workingTreeDiff`、`context.environment`（桌面端 ≥ **0.2.24**）                                             |
+| 历史 RPC             | `session.history` 支持 `limit` 与排他游标 `beforeMessageId`；显式 `detail: "light"` 省略执行详情，可用 `session.messageDetail` 按需获取。省略 `detail` 时仍返回完整历史格式。 |
+
+手机侧图示：[Companion 架构](https://github.com/rururunu/AnyaAndroid/blob/main/docs/ARCHITECTURE.zh-CN.md)。
+
+### 4.2 Companion 文件传输
+
+工作区会话落在 `{workspace}/.acode/uploads/{sessionId}/`。未绑定 Ask 会话落在 `{config}/companion-inbox/{sessionId}/`。
+
+```mermaid
+sequenceDiagram
+  participant P as Companion
+  participant GW as 网关
+  participant Disk as 磁盘
+  Note over P,Disk: 手机 → 桌面
+  P->>GW: file.upload.begin size name
+  GW->>Disk: 创建目标文件
+  loop 并发分片
+    P->>GW: chunk JSON+b64 或二进制帧
+    GW->>Disk: Seek + 按 offset 写入
+  end
+  P->>GW: file.upload.finish
+  Note over P,Disk: 桌面 → 手机
+  P->>GW: file.download.begin path
+  GW-->>P: url /f/:ticket TTL 10m
+  P->>GW: GET /f/:ticket Range
+  GW-->>P: 200 / 206 流式
+```
+
+---
+
+## 5. 模块地图
+
+### 5.1 Rust 领域（`src-tauri/src/core`）
+
+| 模块               | 路径                                        | 职责                                                                                                                                                                  |
+| ------------------ | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat service       | `core/chat/service/`                        | 入口：落库、解析上下文/模型、启动新回合（已有活跃回合则拒绝；`mod.rs` façade）                                                                                        |
+| Stream manager     | `core/chat/stream/`                         | 后台任务、取消、流式聚合、UI 事件、时间线文本                                                                                                                         |
+| Agent runner       | `core/chat/agent.rs`                        | **主** model↔tools 循环                                                                                                                                               |
+| Agent loop 策略    | `core/chat/agent_loop/`                     | stream_turn、tools、challenge、compact、post_edit_verify、soft_inject、failure                                                                                        |
+| 会话存储           | `core/chat/conversation_manager/`           | façade + `messages` / `activity` / `session` / `branch` / `helpers`；SQLite + work timeline                                                                           |
+| DB / journal       | `core/chat/db/`、`core/chat/journal.rs`     | Schema、存取、崩溃恢复（`db/{schema,messages,sessions,tool_activity}`）                                                                                               |
+| 提示词（markdown） | `core/chat/prompts/`、`prompts/*.md`        | system / tools / policies / skills（`include_str!`）                                                                                                                  |
+| Prompt 组装        | `core/chat/prompt/`                         | 固定槽位组装（`PromptBuilder` + `slots`）；易变语境与 `#skill` chips 挂在用户消息尾部；agent-state 只追加；整轮冻结 tool schemas（DeepSeek 磁盘缓存要求精确前缀单元） |
+| Agent runtime      | `core/agent/runtime/`                       | Run 状态机、取消、debug                                                                                                                                               |
+| AI providers       | `core/ai/`                                  | 聊天 Provider 注册表、DeepSeek/Gemini、多模态；**Images API** 独立（`image_gen`）                                                                                     |
+| DeepSeek / OpenAI  | `core/ai/deepseek/`                         | `provider`、`messages/`、`stream/`、`anthropic`、`models`、`multimodal`                                                                                               |
+| Shell jobs         | `core/tools/shell_jobs/`                    | 前台/后台 shell 进程生命周期与输出                                                                                                                                    |
+| 工作区注册表       | `core/workspace/`                           | SQLite 工作区列表（`manager/`、`db`、`helpers`）                                                                                                                      |
+| MCP 客户端         | `core/mcp/`                                 | stdio JSON-RPC（`manager`、`process`、`runtime`、`command`、`remote_auth`）                                                                                           |
+| Images API         | `core/ai/image_gen.rs`                      | `POST /v1/images/generations` / `edits`，走设置 → 生图（`image_providers`）                                                                                           |
+| Image markdown     | `core/ai/image_markdown.rs`                 | 抽取 / 剥离 `![edit-region]`，供聊天、vision、Images 共用                                                                                                             |
+| Tools              | `core/tools/`                               | 注册表、审批、plan/image mode 门禁、文件、shell、skills、子 Agent                                                                                                     |
+| 工作区索引         | `core/tools/workspace_index.rs`             | 分块关键词索引，落在 `.acode/index`（增量 JSONL）；经 `fs_skip` 跳过 `.acode`                                                                                           |
+| Plan mode          | `core/tools/plan_mode.rs`                   | 会话级写操作门禁；Agent 可通过 `request_plan_mode` 征求进入                                                                                                           |
+| Image mode         | `core/tools/image_mode.rs`                  | 会话级生图工具栏参数；工具白名单 + challenge                                                                                                                          |
+| Context            | `core/context/`                             | IDE、选区、剪贴板、环境                                                                                                                                               |
+| Checkpoint         | `core/checkpoint/`                          | 已应用文件变更的撤销 / 审查                                                                                                                                           |
+| Token              | `core/token/`                               | 用量记账（含缓存命中 / reasoning token）与持久化                                                                                                                      |
+| MCP / LSP / Office | `core/mcp`、`core/lsp`、`core/tools/skills` | 外部协议适配                                                                                                                                                          |
+| 协议类型           | `core/runtime/`                             | `ChatMessage`、`StreamEvent`、`WorkTimelineItem`                                                                                                                      |
+| Event bus          | `core/event/`                               | 领域事件                                                                                                                                                              |
+| 插件               | `core/plugins/`                             | 清单、授权、Deno host、官方捆绑；**computer-use** 在 `computer/`（UIA、截屏、`launch`）                                                                               |
+| Remote gateway     | `core/remote/`                              | WS `/remote/v1`；`gateway/`、`state/`、`bridge/`、配对、隧道、上传、**下载 `/f/`**、预览 `/p/`                                                                        |
+
+### 5.2 命名：三处 “runtime”
+
+| 路径                  | 含义                                      |
+| --------------------- | ----------------------------------------- |
+| `core/runtime/`       | 聊天协议类型                              |
+| `crate::runtime/`     | 可插拔工具适配（git、search、browser 等） |
+| `core/agent/runtime/` | Agent **run 生命周期**壳                  |
+
+### 5.3 前端（`src/`）
+
+| 区域                  | 路径                                                                                | 职责                                                                                                                                 |
+| --------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Overlay / Workbench   | `layouts/Overlay.vue`、`layouts/Main.vue`                                           | 窗口壳；工作台内嵌 SettingsPage；导航在 `composables/workbench/`                                                                     |
+| 聊天 UI               | `components/chat/*`                                                                 | 消息列表、时间线、工具卡片、计划批准卡、输入栏（`ChatInputBar` + `input/*`）                                                         |
+| 聊天 composables      | `composables/chat/`                                                                 | `wireChatIpc`、`useComposer{Draft,Mentions,Layout,Pickers,Resize,Submit,Keyboard}`、`useMessage{Scroll,PreviewRail}`、Ask User、附件 |
+| Chat store            | `stores/chat.ts`、`stores/chatSessions.ts`                                          | Pinia façade；会话列表/归档/标题及历史分页游标在 `chatSessions`；compose/stream helper 在旁路模块                                    |
+| Workbench composables | `composables/workbench/`                                                            | `useWorkbenchNavigation`、`useNavigationSidebar`、会话/工作区/审查生命周期                                                           |
+| 其他 stores           | `stores/setting.ts`、`chatModel.ts`、`plugins.ts`                                   | 设置、带缓存与后台发现的模型目录、用户插件                                                                                           |
+| 主题                  | `services/theme/`                                                                   | 目录（浅色/深色）、`ThemeService` 应用路径、`themes.css` token                                                                       |
+| 聊天 services         | `services/chat/`                                                                    | 生图模式、本地图路径、保存图片、composer 分段、token 估算                                                                            |
+| IPC                   | `services/ipc/`                                                                     | 类型化 invoke 与事件订阅                                                                                                             |
+| 流式批处理            | `services/chat/rafBatch.ts`、`composables/chat/wireChatIpc.ts`                      | delta RAF 合并；聊天 IPC 从 `main.ts` 抽出                                                                                           |
+| 设置页                | `pages/Settings/`                                                                   | 服务商 / Agent / MCP / skills / **生图** 提供商                                                                                      |
+| 个人资料设置          | `components/settings/ProfileSettings.vue`、`services/settings/`                     | 本地资料、头像、设置导入导出和用量统计                                                                                               |
+| 浏览器选区            | `services/browser_selection.rs`、`bin/acode_browser_bridge.rs`、`browser-extension/` | 经过认证的可选本地网页选区桥接                                                                                                       |
+
+---
+
+## 6. 控制流 — 发送消息
+
+### 6.1 主路径
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant FE as Presentation
+  participant IPC as commands/chat
+  participant CS as ChatService
+  participant AR as AgentRuntime
+  participant SM as StreamManager
+  participant R as AgentRunner
+  participant P as AIProvider
+  participant T as Tools
+  participant CM as ConversationManager
+
+  FE->>IPC: invoke("chat")
+  IPC->>CS: send(session, message, prefs)
+  alt 会话已有活跃 assistant
+    CS-->>FE: 拒绝（TurnInProgress）
+  else 新回合
+    CS->>CM: 落库 user + pending assistant
+    CS->>AR: create_run + collect_context
+    CS->>SM: spawn stream task
+    SM->>R: run(ChatRequest, tx)
+    loop 直至终态 finish_reason
+      R->>P: stream(request)
+      P-->>SM: Delta / Reasoning / Status / ToolCall
+      SM->>CM: append_work_timeline_text
+      SM-->>FE: chat-delta / chat-reasoning / chat-status
+      opt tool_calls 非空
+        R->>T: execute serial or parallel
+        T->>CM: upsert_tool_activity（+ timeline Tool）
+        T-->>FE: tool-started / tool-finished
+        R->>R: 工具结果写回 messages
+      end
+    end
+    SM->>CM: update_message（Done + content/reasoning/timeline）
+    SM-->>FE: chat-finished or chat-error
+  end
+```
+
+队列里的「立即发送」会先取消当前回合，再走上面的新回合。
+
+### 6.2 前端投影
+
+```mermaid
+flowchart LR
+  Emit[Tauri emit] --> Listen[wireChatIpc 监听]
+  Listen -->|delta / reasoning| RAF[createRafBatch]
+  Listen -->|tool / finish / error| Sync[立即更新 store]
+  RAF --> Store[chatStore.applyStreamDeltas]
+  Sync --> Store
+  Store --> UI[MessageList / AgentWorkDetails]
+```
+
+临时传输错误和 HTTP 408、429、5xx 在 Provider 内最多尝试五次，采用指数退避、
+随机延迟并遵循 `Retry-After`。随后 Agent 最多再恢复三次失败的模型轮次；
+已完成的工具不会重放。重试通过 `chat-status` 发出
+`kind = stream_retry:{attempt}:{max}` 和已提交消息快照，后端与界面只丢弃失败尝试，
+保留已完成的正文、思考、工具证据和时间线。
+
+所有兼容模型的上下文超限都会触发压缩，最多连续尝试三次有效缩减；保留的工具结果
+与对应 Assistant 调用成对保留。不同的成功证据会重置完成检查预算；输出截断和
+未满足的验收条件在有界预算内继续执行。子 Agent 使用失败与进展保护，取消固定 24 步上限。
+
+有限的长 Shell 命令可以后台执行，并须轮询到真实退出后才能确认完成。前台命令仅在
+进程退出、用户取消或达到明确的运行上限时结束；模型判断和静默 I/O 等待不会杀进程。
+旧的非受限 Shell 120 秒默认值一次性迁移到 3600 秒，保留自定义和受限模式限额。
+恢复保留内存中的请求和现有执行日志、检查点；不提供应用重启后的自动执行续接。
+
+### 6.3 调用栈（检索用）
+
+```text
+commands/chat.rs::chat
+  → ChatService::send
+      → AgentRuntime::{create_run, collect_context}
+      → StreamManager::spawn
+          → AgentRunner::run
+              → agent_loop::collect_stream_turn
+              → AIProvider::stream
+              → agent_loop::tools::{execute_serial, execute_parallel}
+              → agent_loop::{challenge, mid_turn_compact, post_edit_verify, soft_inject, failure}
+```
+
+---
+
+## 7. 编排 — AgentRunner 循环
+
+`AgentRunner::run` 是聊天、eval 与子 Agent 的**唯一**编排主轴。
+
+```mermaid
+stateDiagram-v2
+  [*] --> SoftInject: run / continue
+  SoftInject --> CheckSteps: drain soft_queue
+  CheckSteps --> StopMaxSteps: steps >= max_steps
+  CheckSteps --> Compact: else
+  Compact --> StreamTurn: maybe mid-turn compact
+  StreamTurn --> FinalGate: no tool_calls
+  StreamTurn --> ToolPhase: tool_calls
+  FinalGate --> SoftInject: challenge continue
+  FinalGate --> [*]: Finish
+  ToolPhase --> StopDenied: user denied
+  ToolPhase --> StopBreaker: FailureBreaker tripped
+  ToolPhase --> SoftInject: append results, steps++
+  StopMaxSteps --> [*]
+  StopDenied --> [*]
+  StopBreaker --> [*]
+```
+
+| 模块               | 关注点                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------- |
+| `stream_turn`      | 将一轮 Provider 流折叠为 content / reasoning / tool_calls                                         |
+| `tools`            | 串行 / 并行调度；工具 activity 事件                                                               |
+| `challenge`        | 空完成 / 目标路径全覆盖 / 未验证修改 / 未完成 checklist / stall；验证须读回已改路径或成功检查命令 |
+| `mid_turn_compact` | 上下文窗口压力下的压缩（机械摘要钉住目标与路径；可折叠只追加的 agent-state）                      |
+| `task_state`       | 运行时任务记忆；以只追加的 `agent-state-*` 用户 tip 注入（从不中途搬移历史）                      |
+| `post_edit_verify` | 成功改文件后做轻量检查；仅 `exit_code=0` 算成功；结果以 **system 文本**回灌（不是 `role=tool`）   |
+| `soft_inject`      | 循环里仍会排空内部追问队列。排队消息的「立即发送」不走这里：先取消当前回合，再作为新回合发出      |
+| `failure`          | 连续失败 / 同错重复的熔断                                                                         |
+
+整轮工具 Schema 在**第一次** Provider 调用时冻结（`AgentRunner` 保留首步
+`focused_schemas`）。中途接受 Plan / 切到 question-only **不得**重建 `tools`，
+否则会失效前缀缓存（DeepSeek 磁盘缓存尤甚）。即使冻结的 Agent schema 仍含写工具，
+写操作仍由 `PlanModeStore::authorize` 拦截；Agent schema 保留 `save_plan`，以便
+中途进入 Plan 时无需重建 schema。
+
+### Ask / Agent / Plan / Image
+
+通过**工具 Schema 暴露**、**审批策略**、**计划门禁**与 **Image 模式会话选项**约束，而不是单独的 Runner。
+
+| 模式      | 行为                                                                          |
+| --------- | ----------------------------------------------------------------------------- |
+| **Ask**   | 不开放写文件 / Shell / Git 等写操作                                           |
+| **Agent** | 按审批模式开放写操作；可通过 `request_plan_mode` 征求进入（从不静默开闸）     |
+| **Plan**  | 用户显式选择，或接受 `request_plan_mode` 后进入；写工具被拦截，直到用户批准   |
+| **Image** | 仅暴露 `generate_image`；工具栏尺寸/画质/风格钉死；challenge 要求真正生成图片 |
+
+### 计划门禁（Plan gate）
+
+计划状态由 `core/tools/plan_mode.rs` 的进程内 `PlanModeStore` 按 `session_id` 持有（与 ChatMode 正交：门禁开着时即使 compose 仍显示 Agent，写工具也会被拒）。
+
+```mermaid
+flowchart TB
+  Send[ChatService::send] --> Mode{chat_mode?}
+  Mode -->|Ask| Clear[关闭门禁]
+  Mode -->|Plan| On[打开门禁]
+  Mode -->|Agent| Hint[注入 plan-request-hint.md<br/>除非 skip_auto_plan]
+  Hint --> AskPlan{模型调用<br/>request_plan_mode?}
+  AskPlan -->|用户接受| On
+  AskPlan -->|拒绝 / 跳过| Off[保持 Agent]
+  On --> Prompt[注入 plan-mode.md<br/>门禁拦截写工具]
+  Prompt --> Draft[助手起草计划并停止]
+  Draft --> UI[MessageList 末尾<br/>PlanApprovalCard]
+  UI -->|退出计划| Clear
+  UI -->|批准并执行| Exec[关门禁 + skip_auto_plan<br/>发送执行提示]
+  Exec --> Writers[写工具可用]
+```
+
+| 环节           | 位置                                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 计划征求提示   | `prompts/plan-request-hint.md`（Agent 回合；稳定的 policy-suffix 槽）                                                                         |
+| 征求工具       | `request_plan_mode` → 用户接受/拒绝                                                                                                           |
+| 门禁授权       | `PlanModeStore::authorize`（拒绝非只读写工具；主强制点）                                                                                      |
+| 回合初 schemas | 以当前 ToolManager 注册表为准（Ask 开局已是 `ask_mode()`）。不再按 question-only 收缩。Plan **不**收缩 schemas；靠 authorize 拦写。整轮冻结。 |
+| 提示词         | `prompts/plan-mode.md`（中途接受时另有 `ensure_plan_mode_prompt`）                                                                            |
+| 计划列表       | 工具 `update_tasks` / `todo_write` → `task-list-updated` / 消息 `toolActivities`                                                              |
+| 批准 UI        | `PlanApprovalCard.vue` 挂在**最后一条已完成助手消息末尾**（类似 `CodeChangesSummary`）                                                        |
+| 批准动作       | 关门禁 → compose 回到 Agent → `send(..., skipAutoPlan/resumePlan)`；界面只保留短批准文案，checklist 仅注入 API 请求                           |
+
+**没有** `should_auto_plan` 启发式：Agent 从不静默打开计划门禁。
+
+批准卡片**不**再使用输入栏上方横幅，避免挤占输入区；步骤列表与 Diff 摘要同级展示。
+
+### Image 模式
+
+Image 模式是独立的 `chat_mode`（输入栏芯片），不是聊天 Provider 的模型切换。
+密钥与 Base URL 来自**设置 → 生图**（`image_providers`）；`generate_image` **从不**使用聊天
+`custom_providers`。
+
+```mermaid
+flowchart LR
+  UI[ImageGenToolbar] --> Compose[sessionCompose.imageGen]
+  Compose --> Send[ChatService::send]
+  Send --> Store[image_mode 会话选项]
+  Send --> Prompt[image-mode.md + ImageModePolicy]
+  Send --> Tools[tools.image_mode 白名单]
+  Tools --> Gen[generate_image]
+  Gen --> API[Images API generations 或 edits]
+  API --> MD[markdown + acode-images JSON fence]
+  MD --> Card[GeneratedImageCard]
+```
+
+| 环节             | 位置                                                                        |
+| ---------------- | --------------------------------------------------------------------------- |
+| 工具栏 / payload | `services/chat/imageGenMode.ts`（UI `resolution` ≠ Images API `quality`）   |
+| 会话选项         | `core/tools/image_mode.rs`                                                  |
+| 提示词           | `prompts/image-mode.md` + `prompt/slots`                                    |
+| 工具             | `core/tools/builtin/image_gen.rs`                                           |
+| HTTP 适配        | `core/ai/image_gen.rs`（blocking + `run_isolated`）                         |
+| Markdown 辅助    | `core/ai/image_markdown.rs`                                                 |
+| Challenge        | `agent_loop/challenge.rs` `require_image`                                   |
+| 结果解析         | `services/chat/localImageSrc.ts`（优先 `acode-images` fence，回退 markdown） |
+| 预览 / 保存      | `services/chat/saveChatImage.ts`、`GeneratedImageCard.vue`                  |
+
+双重过滤：`ChatService` 选用 `tools.image_mode()`，`ToolManager::schemas_for_request`
+再查一次 `is_image_mode(session_id)`。
+
+### AgentRunner 与 AgentRuntime
+
+|            | AgentRunner                  | AgentRuntime                                         |
+| ---------- | ---------------------------- | ---------------------------------------------------- |
+| 回答的问题 | 「模型下一步做什么？」       | 「本轮 run 是否活跃 / 已取消？」                     |
+| 拥有       | 流式回合、工具批次、完成门禁 | Run id、epoch、取消、事件桥                          |
+| 调用方向   | 由 `StreamManager` 调用      | 创建 run；流式委托给 `StreamManager` → `AgentRunner` |
+
+`core/agent/` 下的 Planner / Executor **不是**第二套对话 Agent 循环。
+
+---
+
+## 8. 工作时间线（交错 UI）
+
+叙述与工具卡片必须按真实发生顺序展示。
+
+```mermaid
+flowchart TB
+  subgraph Timeline["ChatMessage.work_timeline"]
+    R1[Reasoning 段]
+    T1[Tool 引用]
+    C1[Content 段]
+    T2[Tool 引用]
+    C2[Content 段]
+  end
+
+  R1 --> T1 --> C1 --> T2 --> C2
+```
+
+| 类型        | 产生时机                       | 持久化                             |
+| ----------- | ------------------------------ | ---------------------------------- |
+| `reasoning` | 流式思考增量                   | 同类型合并到末尾项；随消息落盘     |
+| `content`   | 流式正文增量                   | 同上                               |
+| `tool`      | 某 activity id **首次** upsert | 锚定在开始时刻；状态更新不重复插入 |
+
+前端 `AgentWorkDetails` 渲染时间线；对旧历史或缺增量的整块回复做 trailing reconcile。
+
+---
+
+## 9. 持久化与崩溃恢复
+
+```mermaid
+flowchart TB
+  Live[内存 ConversationManager] -->|终态更新 / 工具完成| DB[(chat_messages SQLite)]
+  Live -->|流式 delta| J[(chat_journal_events)]
+  Boot[应用启动] --> Hydrate[hydrate_orphaned_from_journal]
+  Hydrate --> Settle[结算 pending/streaming + running tools]
+  Settle --> DB
+```
+
+| 存储                  | 内容                                                                               |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `chat_messages`       | content、reasoning、tool_activities、**work_timeline**、tool_calls、status、tokens |
+| `chat_journal_events` | 进行中回合的压缩 delta 快照                                                        |
+| 会话元数据            | 标题、工作区绑定                                                                   |
+| Token 用量记录        | Provider 上报时的按 run 记账；DeepSeek 缓存命中 / reasoning token                  |
+
+启动时对孤儿 `pending` / `streaming` 消息做 journal 回填并结算到终态，避免 UI 卡在「执行中」。
+
+---
+
+## 10. 上下文组装与前缀缓存稳定性
+
+回合流式开始前，`PromptBuilder` 按固定槽位组装，使 Provider **前缀缓存**
+（DeepSeek 磁盘 KV cache 及同类机制）能在多步 / 多轮间精确复用前缀单元。
+
+```text
+[0] SYSTEM_PROMPT
+[1] 稳定工作区 / IDE 身份
+[2] 项目规则（agent.md / AGENTS.md）
+[3] 召回记忆
+[4] 可选策略后缀（协作 / minimal-coding / plan hint / plan-mode / …）
+[5] 插件 prompt 后缀（块按序排序，保证确定性）
+[6..] 历史 + 当前用户
+       └─ `#skill` / `#mcp` chips 与易变 IDE/git/剪贴板
+          追加在**当前用户**文本末尾（绝不插入前缀中段的 system 槽）
+```
+
+```mermaid
+flowchart LR
+  SYS[System + 稳定槽] --> HIST[历史消息]
+  HIST --> USER[当前用户 + 易变尾部]
+  TOOLS[整轮冻结的 tool schemas] --> REQ[Provider 请求]
+  SYS --> REQ
+  HIST --> REQ
+  USER --> REQ
+```
+
+### DeepSeek 向规则（对其他前缀缓存同样有益）
+
+官方行为（[Context Caching](https://api-docs.deepseek.com/guides/kv_cache/)）：
+命中要求与已持久化前缀单元**完整匹配**（Sliding Window Attention）。缓存构建需数秒；
+命中为 best-effort。产品内强制的实践规则：
+
+| 规则                 | 实现                                                     |
+| -------------------- | -------------------------------------------------------- |
+| 回合内历史只追加     | 工具结果只 push，不改写更早消息                          |
+| 不中途搬移 state     | `task_state::inject` 只更新 tip 或追加 `agent-state-{n}` |
+| 整轮 `tools` 稳定    | `AgentRunner` 冻结首步 schemas                           |
+| 易变 UI 语境离开前缀 | 光标 / 选区 / git / 剪贴板 / `#skill` chips 挂用户尾部   |
+| 插件文案确定性       | 插件 prompt 块排序后再 assemble                          |
+
+**命中率预期：** 前缀未被破坏时，Agent 多步回合在冷启动首包之后常见约 85–95%。
+会话累计更低，因为每条新用户文本与大段 tool 输出都是 miss——这是计费口径，不是缓存坏了。
+带大段 `read_file` / 搜索结果的改代码任务，**会话**命中率很少能长期稳住 95%+。
+
+路径解析优先级见 `prompts/context.md` 与 `core/context` providers。
+
+用量 UI：`prompt_cache_hit_tokens` / miss → `cacheReadTokens`；命中 % =
+`cacheRead / (inputMiss + cacheRead)`（`services/chat/tokenEstimate.ts`）。
+
+---
+
+## 11. 工具、审批与 Skills
+
+实现细节与能力边界见[权限与代码预览](./permissions-and-preview.zh-CN.md)。
+
+工作台和弹窗共用待处理交互的队列投影，启动、聚焦及切换会话时与后端快照对齐；全量快照也恢复后台会话的请求。后端序号保留请求顺序，已结束的请求 ID 防止迟到事件或快照重新显示旧卡片。审批和问题在所有结束路径广播 `interaction-resolved`，包括取消及超时。图片标签、选中图片和子 Agent 入口状态按根会话通过 `acode.shared-review.v1.*` 共享，原生窗口尺寸保留各自设置。
+
+权限范围独立于 Ask/Agent/Plan 聊天模式。界面三档为**只读**、**工作区可写**和**完全访问**，历史存储值 `ask`、`auto`、`alwaysAllow` 分别映射至这三档。只读拒绝文件写入和任意 Shell 执行，DeepSeek 工具别名遵循相同规则。工作区可写允许工作区内原生文件编辑，外部路径保留路径权限检查，非隔离 Shell 每次执行均需单独批准。完全访问跳过这些交互审批，但保留明确的安全规则。工具批准只对当前请求生效，不再按工具名称授予整个会话权限。工具和路径审批随取消结束，最长等待十分钟。策略变更、人工审批请求及结果写入 `chat_permission_events`；审计写入失败时拒绝执行。这些检查尚不具备 dsh 的操作系统级进程隔离。
+
+```mermaid
+flowchart TB
+  Model[Model tool_calls] --> Reg[ToolRegistry]
+  Reg --> Mode{Ask / Agent / plan gate / image mode / read_only?}
+  Mode -->|拦截| Deny[省略 Schema 或拒绝]
+  Mode -->|允许| Appr[审批策略]
+  Appr -->|询问用户| UI[ask_user / 权限 UI]
+  Appr -->|允许| Exec[Builtin / Skill / MCP / Office / Subagent]
+  Exec --> Act[ToolActivity + work_timeline]
+  Exec -->|update_tasks| Tasks[sessionTasks + PlanApprovalCard]
+```
+
+计划门禁开启时，写工具仍可出现在 schema 中，但由
+`PlanModeStore::authorize` 拒绝。**Ask** 通过启动时使用 `ask_mode()` ToolManager
+收回写工具（不再靠逐条 question-only 启发式）。Agent/Plan 共用完整注册表并整轮冻结。
+`update_tasks`（与只读探索）始终可用。
+
+Skills 位于 `src-tauri/prompts/skills/`（含厂商资源）。调用时常注入 playbook，并可按子 Agent 执行（可选 `read_only`）。内置 `bid_tech` Python 工具包已不再随应用发布，文档生成技能改走外部技能流程。
+
+### 11.1 Provider 协议与思考能力解析
+
+Provider 边界将模型选择、能力元数据、协议选择和线路解析集中处理，`ChatService` 不需要感知具体 Provider。
+
+```mermaid
+flowchart LR
+  Settings[服务商设置] --> Registry[ProviderRegistry]
+  Registry --> ModelRef[ModelRef + 能力]
+  ModelRef --> Reasoning[ReasoningProfile]
+  ModelRef --> Protocol[WireProtocol]
+  Protocol -->|主协议| Request[Provider 请求]
+  Request -->|格式拒绝| Fallback[协议回退]
+  Fallback --> Request
+  Request --> Stream[Chat / Responses / Anthropic SSE]
+  Stream --> Cache[记忆模型协议]
+```
+
+`reasoningProfiles` 为模型族提供支持的档位；`reasoningControl` 优先使用 Provider 广告的能力，其次根据模型和服务商推断。请求层会限制不支持的值，并按协议发送 `thinking`、`enable_thinking`、`reasoning.effort` 或 `reasoning_effort`。
+
+自定义服务商可以选择 Chat Completions、Responses 或 Anthropic Messages。识别到格式不兼容时，注册表会尝试剩余线路协议，并按服务商和模型记住成功协议。禁用模型会在网络请求前被拒绝。
+
+### 11.2 工作区索引
+
+`search_codebase` 刷新工作区关键词索引，按关键词匹配打分并返回指定数量的结果。索引覆盖重叠内容分块、符号、文件路径与决策文档（AGENTS.md / ADR），以 JSONL 保存在 `{workspace}/.acode/index/`，增量更新变更文件。
+
+实现：`core/tools/workspace_index.rs`；工具入口：`core/tools/builtin/misc.rs`。
+
+### 11.3 电脑操控
+
+官方插件 `computer-use`（`core/plugins/computer/`，仅 Windows，默认关闭）。进程内嵌入 Ghost（`ghost-session`）；Deno host 只声明 schema。流水线：`window` 锚定 → `see` → `act`（读 `verified`）→ `wait`/`assert`；浏览器走 `browser`/`tab`（CDP）。Acode 保留权限、审批与 HUD。内置 playbook：`src-tauri/plugins/computer-use/skills/windows.md`（`contributes.agent.skills`）。
+
+详见 [电脑操控](./computer-use.zh-CN.md)。
+
+---
+
+## 12. 事件契约（领域 → UI）
+
+| BusEvent          | Tauri 事件                       | 消费效果                              |
+| ----------------- | -------------------------------- | ------------------------------------- |
+| `ChatStarted`     | `chat-started`                   | 插入 user + pending assistant         |
+| `ChatDelta`       | `chat-delta`                     | 追加正文（RAF 批处理）                |
+| `ChatReasoning`   | `chat-reasoning`                 | 追加思考                              |
+| `ChatStatus`      | `chat-status`                    | 活动标签 / `stream_retry` 重置        |
+| `ChatFinished`    | `chat-finished`                  | 用最终内容替换，标记完成              |
+| `ChatError`       | `chat-error`                     | 标记错误并展示文案                    |
+| 工具活动          | `tool-started` / `tool-finished` | Upsert 工具卡片                       |
+| `PlanModeChanged` | `plan-mode-changed`              | 同步门禁；必要时把 compose 切到 Plan  |
+| `TaskListUpdated` | `task-list-updated`              | 更新 `sessionTasks`（批准卡步骤来源） |
+
+`ChatSendResponse` 仅返回 id；流式正文走事件通道。
+
+---
+
+## 13. 会话 / 工作区模型
+
+| 类型                            | 绑定         | 典型入口                                     |
+| ------------------------------- | ------------ | -------------------------------------------- |
+| 快速提问                        | 无工作区     | IDE 外悬浮窗                                 |
+| 工作区会话                      | 绑定文件夹   | IDE 前台、`/work`、选择器                    |
+| 置顶                            | 用户置顶标记 | 工作台侧栏                                   |
+| 已归档工作区                    | 绑定文件夹   | 工作台归档 / 恢复                            |
+| Companion FAB（无 workspaceId） | 无工作区     | 手机新会话——**不得**继承桌面当前选中的工作区 |
+
+悬浮窗与工作台共享会话存储；「在工作台打开」复用同一 `session_id`。工作区的排序、置顶、折叠状态和归档状态独立于聊天消息持久化。Companion 经网关投影同一存储。
+
+桌面端 `chat_history` IPC 先返回最新一页，并附带 `hasMore`、`oldestId` 和 `oldestTimestamp`。更早一页用 `beforeId` 定位，即使消息时间戳相同也不会拆错页；消息附属元数据只随当前页传输。Rust 会话存储仍保留完整历史供 Agent 使用。前端向上滚动时前插旧消息，并保持滚动锚点。
+
+`chatModel.ts` 从 `services/chat/modelListCache.ts` 或已配置模型 ID 预填选择器，随后在后台刷新服务商模型。`services/settings/startupCache.ts` 在设置 IPC 返回前预填输入栏的模型和思考控制；持久化设置仍是最终依据。导航展开 ID 通过 `composables/workbench/navigationCollapseState.ts` 存于浏览器存储，未列出的分组和工作区默认收起。
+
+---
+
+## 14. 更新 / 发布数据流
+
+```mermaid
+flowchart LR
+  Tag[git tag v*] --> CI[release.yml]
+  CI --> MSI[Acode_x_x64.msi + .sig]
+  CI --> LJ[latest.json]
+  MSI --> GH[GitHub Release assets]
+  LJ --> GH
+  App[已安装 Acode] -->|updater 插件| GH
+```
+
+细节见 [release.zh-CN.md](./release.zh-CN.md)。
+
+---
+
+## 15. 扩展点
+
+| 目标                 | 首选挂接点                                                                    |
+| -------------------- | ----------------------------------------------------------------------------- |
+| 新模型厂商           | `core/ai` 实现 `AIProvider` + 设置接线                                        |
+| 新内置工具           | `core/tools` 注册表 + 可选 `runtime/` 适配                                    |
+| 新回合策略           | `core/chat/agent_loop` 模块，由 `AgentRunner` 调用                            |
+| 新窗口表面           | Tauri window label + `src/main.ts` 启动分支                                   |
+| 外部上下文源         | `core/context` provider                                                       |
+| 新 Skill             | `src-tauri/prompts/skills/*.md`（按需加资源）                                 |
+| Agent 插件 playbook  | `contributes.agent.skills` markdown（见 [电脑操控](./computer-use.zh-CN.md)） |
+| Companion RPC / 事件 | `core/remote/protocol.rs` + AnyaAndroid 手机客户端                            |
+
+避免在 `AgentRunner` 之外平行再造一套 Agent 循环。
+Companion 不得再长出第二套 Agent 运行时。
+
+---
+
+### 15.1 v0.2.26 原生工具与交付链路
+
+模型解析结果决定是否使用 `core/tools/dsh/`，而不是仅依据服务商名称。普通模型、DeepSeek 主任务和子任务分别选择自身工具集；`present` 同时存在于通用注册表。导入的静态契约位于 `prompts/dsh/`，执行与审批沿用 Acode 宿主，详见 [DeepSeek 原生链路](./deepseek-harness.zh-CN.md)。
+
+`core/tools/present.rs` 验证路径权限与普通文件，返回版本化文件元数据；`agent_loop/tools.rs` 和 `db/tool_activity.rs` 保留成功交付的结构化结果。前端 `presentedFiles.ts` 从完成的主任务工具活动中提取卡片，`PresentedFiles.vue` 渲染交互，`DeliveryFileIcon.vue` 使用本地 SVG。没有新增独立交付表，也不通过扫描最终回复生成卡片，详见 [文件交付](./file-delivery.zh-CN.md)。
+
+`core/tools/skills/office_runtime.rs` 承接保存文件工作流，`scripts/build-office-runtime.mjs` 生成打包资源。Office 渲染是技能执行能力，当前交付卡片没有 Office/PDF 内置预览侧栏。
+
+调用诊断写入配置目录的 JSONL，`scripts/deepseek-metrics-report.mjs` 汇总用量、耗时和独立验收结果。reasoning 与工具调用配对、请求副本裁剪及模型阶段重试保留已完成工具边界；这不代表进程崩溃后能自动续跑全部任务。此前提出的 journal 队列可靠性、生命周期治理及进一步虚拟化尚不属于此次版本新增能力。
+
+### 15.2 v0.2.27 输入栏、窗口、设置与更新
+
+`ChatInputBar.vue` 与 `UserMessageFooter.vue` 统一当前输入栏和已发送消息编辑栏的操作布局。模型与思考强度位于右侧；窄窗口会隐藏部分选中项文字，思考强度始终只显示文字。`useComposerPickerFocus.ts` 协调选择器焦点，思考强度滑杆在拖动结束时提交最终值。`stores/setting.ts` 对单独修改思考强度或审批模式的操作先更新输入栏，收到设置广播时避免重复应用整套主题和设置。
+
+`layouts/Overlay.vue` 按内容测量输入悬浮窗高度，并跳过尺寸未变化的原生窗口调整。`useMessageScroll.ts` 在内容增长后处理聊天滚动。Windows 上下文提供者在悬浮窗取得焦点前获取选区位置；`services/window.rs` 在可用时参考该位置，让悬浮窗尽量避开选中文字。
+
+`services/settings_store.rs` 将内嵌主题图片迁移到应用设置目录下的 `theme-backgrounds` 文件夹，以内容哈希命名。运行时设置只保存路径，可读取的图片仍会内嵌到便携资料导出文件中。`commands/settings.rs` 将设置 I/O 移至阻塞工作线程，避免占用窗口事件线程。
+
+`stores/updater.ts` 检测到新版本时显示 `SidebarUpdateButton.vue`。`WorkbenchUpdateDialog.vue` 在安装前展示版本说明，并与关于页共用 `UpdaterProgress.vue`。
+
+## 16. 相关源码入口
+
+| 关注点                      | 从此处开始                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------ |
+| 应用启动 / 托盘 / 热键      | `src-tauri/src/lib.rs`                                                                                 |
+| 聊天 IPC                    | `commands/chat.rs`                                                                                     |
+| 发送与上下文组装 / 计划门禁 | `core/chat/service/`、`core/tools/plan_mode.rs`                                                        |
+| 流式生命周期 + 时间线文本   | `core/chat/stream/`                                                                                    |
+| 时间线持久化                | `core/chat/conversation_manager/`、`core/chat/db/`                                                     |
+| Agent 循环                  | `core/chat/agent.rs`、`core/chat/agent_loop/`                                                          |
+| Run 壳                      | `core/agent/runtime/`                                                                                  |
+| Image 模式 / Images API     | `core/tools/image_mode.rs`、`core/ai/image_gen.rs`、`prompts/image-mode.md`                            |
+| 前端 IPC 与流式批处理       | `src/services/ipc/`、`src/composables/chat/wireChatIpc.ts`、`src/stores/chat.ts`                       |
+| Chat store 旁路模块         | `src/stores/chatSessions.ts`、`chatCompose.ts`、`chatHistory.ts`、`chatStream.ts`                      |
+| 输入栏抽取                  | `src/composables/chat/useComposer*.ts`、`useMessageScroll.ts`、`useMessagePreviewRail.ts`              |
+| Remote gateway / 配对       | `core/remote/gateway/`、`pairing.rs`、`tunnel.rs`                                                      |
+| Shell jobs / 工作区 / MCP   | `core/tools/shell_jobs/`、`core/workspace/`、`core/mcp/`                                               |
+| 插件 / 电脑操控             | `core/plugins/`、`src-tauri/plugins/computer-use/`、[电脑操控](./computer-use.zh-CN.md)                |
+| DeepSeek stream             | `core/ai/deepseek/stream/`                                                                             |
+| 时间线 UI                   | `src/components/chat/AgentWorkDetails.vue`                                                             |
+| 计划批准卡                  | `src/components/chat/PlanApprovalCard.vue`、`MessageList.vue`                                          |
+| 生图 UI                     | `src/components/chat/GeneratedImageCard.vue`、`ImagePreviewSidebar.vue`                                |
+| 内嵌设置                    | `pages/Settings/`                                                                                      |
+| 主题应用路径                | `src/services/theme/`、`stores/setting.ts` `applyTheme`                                                |
+| 主题图片持久化              | `services/settings_store.rs`、`commands/settings.rs`、`src/stores/setting.ts`                          |
+| 输入栏与历史消息编辑栏      | `src/components/chat/ChatInputBar.vue`、`UserMessageFooter.vue`                                        |
+| 悬浮窗定位与尺寸            | `services/window.rs`、`core/context/provider/clipboard_provider.rs`、`src/layouts/Overlay.vue`         |
+| 应用内更新界面              | `src/components/workbench/SidebarUpdateButton.vue`、`WorkbenchUpdateDialog.vue`、`UpdaterProgress.vue` |
+| 工作台毛玻璃 / 窗口圆角     | `services/workbench_glass.rs`、`overlay/appearance.ts`                                                 |
+| 网关 HTTP 分流              | `core/remote/http_proxy.rs`（`/remote/v1`、`/f/`、`/p/`）                                              |
+| Companion 文件传输          | `core/remote/upload.rs`、`download.rs`                                                                 |
+| 工作区索引                  | `core/tools/workspace_index.rs`                                                                        |
+| 手机应用                    | [AnyaAndroid](https://github.com/rururunu/AnyaAndroid)                                                 |
+
+可选 Chrome / Edge 选区扩展通过已注册的 Native Messaging host，将网页选中文字转发给经过认证的本地回环监听器。缓存选区绑定前台浏览器窗口，并在 60 秒后过期；不会采集浏览历史。安装与边界见[扩展说明](../browser-extension/README.zh-CN.md)。
+
+成功的文本文件读取以可展开的语法高亮代码卡片展示。点击文件后，工作台或弹窗会打开只读侧栏，并高亮实际返回的行范围。侧栏支持自动换行；文件已变化时保留读取快照，并可手动查看当前文件上下文。预览命令只接受已记录的成功读取活动 ID，按原工作区解析路径，最多加载 1 MiB 的 UTF-8 文本；文件无法加载时回退到读取时保存的片段。
+
+差异侧栏使用连续多文件视图，文件树负责跳转，狭窄时自动收起。滚出视野或关闭侧栏时卸载差异正文，并保留测得的占位高度。流式 Markdown 在空闲时段解析，实时工作时间线避免逐块重复拼接，以降低输入区交互延迟。手机端通过 `session.readCodePreview` 读取已记录活动的当前代码，接收 `workspace.archived.snapshot` 与允许字段范围内的 `settings.defaults`，不接收完整设置或密钥。

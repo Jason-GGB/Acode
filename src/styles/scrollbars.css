@@ -1,0 +1,140 @@
+/* Peek 统一滚动条：细轨道、无箭头、低存在感；全应用默认生效。 */
+
+:root {
+  --peek-scrollbar-size: 4px;
+}
+
+*,
+.peek-scrollbar {
+  scrollbar-gutter: auto;
+}
+
+*::-webkit-scrollbar,
+.peek-scrollbar::-webkit-scrollbar {
+  width: var(--peek-scrollbar-size);
+  height: var(--peek-scrollbar-size);
+}
+
+/* WebView2 / Chromium / legacy Edge：彻底隐藏箭头按钮 */
+*::-webkit-scrollbar-button,
+*::-webkit-scrollbar-button:single-button,
+*::-webkit-scrollbar-button:single-button:vertical:decrement,
+*::-webkit-scrollbar-button:single-button:vertical:increment,
+*::-webkit-scrollbar-button:vertical:start:decrement,
+*::-webkit-scrollbar-button:vertical:end:increment,
+*::-webkit-scrollbar-button:horizontal:start:decrement,
+*::-webkit-scrollbar-button:horizontal:end:increment,
+.peek-scrollbar::-webkit-scrollbar-button,
+.peek-scrollbar::-webkit-scrollbar-button:single-button,
+.peek-scrollbar::-webkit-scrollbar-button:single-button:vertical:decrement,
+.peek-scrollbar::-webkit-scrollbar-button:single-button:vertical:increment,
+.peek-scrollbar::-webkit-scrollbar-button:vertical:start:decrement,
+.peek-scrollbar::-webkit-scrollbar-button:vertical:end:increment,
+.peek-scrollbar::-webkit-scrollbar-button:horizontal:start:decrement,
+.peek-scrollbar::-webkit-scrollbar-button:horizontal:end:increment {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+*::-webkit-scrollbar-track,
+.peek-scrollbar::-webkit-scrollbar-track {
+  margin: 2px 0;
+  background: transparent;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb,
+.peek-scrollbar::-webkit-scrollbar-thumb {
+  min-height: 24px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--peek-scrollbar, color-mix(in srgb, var(--peek-text) 14%, transparent));
+  background-clip: padding-box;
+  transition: background 160ms ease;
+}
+
+*::-webkit-scrollbar-thumb:hover,
+.peek-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--peek-scrollbar-hover, color-mix(in srgb, var(--peek-text) 26%, transparent));
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:active,
+.peek-scrollbar::-webkit-scrollbar-thumb:active {
+  background: var(--peek-scrollbar-hover, color-mix(in srgb, var(--peek-text) 38%, transparent));
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner,
+.peek-scrollbar::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 横向标签条：保持无滚动条 */
+.peek-card-tabs {
+  scrollbar-width: none;
+}
+
+.peek-card-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* 设置页 reka-ui 自定义滚动条 */
+[data-slot="scroll-area-scrollbar"][data-orientation="vertical"] {
+  width: var(--peek-scrollbar-size) !important;
+  border-left: 0 !important;
+  padding: 1px 0 !important;
+}
+
+[data-slot="scroll-area-scrollbar"][data-orientation="horizontal"] {
+  height: var(--peek-scrollbar-size) !important;
+  border-top: 0 !important;
+  padding: 0 1px !important;
+}
+
+[data-slot="scroll-area-thumb"] {
+  background: var(
+    --peek-scrollbar,
+    color-mix(in srgb, var(--peek-text) 14%, transparent)
+  ) !important;
+  border-radius: 999px !important;
+}
+
+[data-slot="scroll-area-thumb"]:hover {
+  background: var(
+    --peek-scrollbar-hover,
+    color-mix(in srgb, var(--peek-text) 26%, transparent)
+  ) !important;
+}
+
+/* 设置页左侧分类栏 */
+[data-sidebar="content"].peek-scrollbar::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sidebar-foreground) 14%, transparent);
+  background-clip: padding-box;
+}
+
+[data-sidebar="content"].peek-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--sidebar-foreground) 26%, transparent);
+  background-clip: padding-box;
+}
+
+/* 欢迎引导：固定浅色底 */
+.onboarding.peek-scrollbar::-webkit-scrollbar-thumb,
+.onboarding .peek-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(28, 25, 21, 0.18);
+  background-clip: padding-box;
+}
+
+.onboarding.peek-scrollbar::-webkit-scrollbar-thumb:hover,
+.onboarding .peek-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(28, 25, 21, 0.3);
+  background-clip: padding-box;
+}
+
+/* CodeMirror diff 编辑器内滚动容器 */
+.cm-scroller.peek-scrollbar {
+  overscroll-behavior: contain;
+}

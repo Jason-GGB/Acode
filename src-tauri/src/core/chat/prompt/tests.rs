@@ -1,0 +1,790 @@
+use super::language::inject_language_blocks;
+use super::slots::{format_volatile_context, inject_context};
+use super::*;
+
+use crate::core::chat::limits::{CLIPBOARD_MAX_CHARS, CONTEXT_BLOCKS_TOTAL_MAX_CHARS};
+use crate::core::runtime::{ChatMessage, MessageStatus, RequestContext, Role};
+use crate::models::settings::{AppLanguage, ReasoningLanguage};
+
+#[test]
+fn dsh_prompt_omits_legacy_tool_policies_and_keeps_stable_prefix() {
+    let context = RequestContext {
+        workspace: Some(crate::core::runtime::request::WorkspaceContext {
+            name: "project".into(),
+            root: r"C:\project".into(),
+        }),
+        ..Default::default()
+    };
+    let preferences = PromptPreferences {
+        minimal_coding: true,
+        plan_mode: true,
+        suggest_plan_request: true,
+        ..Default::default()
+    };
+    let build = |memory| {
+        PromptBuilder::build_dsh(PromptBuildInput {
+            request_id: "r",
+            session_id: "s",
+            history: &[],
+            context: &context,
+            project_rules: Some("Project-specific rule"),
+            recalled_memories: Some(memory),
+            preferred_resources: None,
+            provider: Some("deepseek".into()),
+            preferences: &preferences,
+        })
+    };
+    let first = build("one");
+    let second = build("two");
+    assert!(first.messages[0].id.starts_with("dsh-identity-"));
+    let prefix = first
+        .messages
+        .iter()
+        .position(|m| m.id == "memories-s")
+        .unwrap();
+    assert_eq!(first.messages[..prefix], second.messages[..prefix]);
+    assert!(first
+        .messages
+        .iter()
+        .any(|m| m.content == "Project-specific rule"));
+    let text = first
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("run_shell"));
+    assert!(!text.contains("request_plan_mode"));
+    assert!(!text.contains("save_plan"));
+    assert!(!text.contains("read_file"));
+    assert!(text.contains("(read, glob, grep,"));
+    let old = PromptBuilder::build(PromptBuildInput {
+        request_id: "r",
+        session_id: "s",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: Some("other".into()),
+        preferences: &preferences,
+    });
+    assert!(old.messages.iter().any(|m| m.id == "system-s"));
+    assert!(!old.messages.iter().any(|m| m.id.starts_with("dsh-")));
+}
+
+#[test]
+fn dsh_image_mode_prompt_requires_generation_with_selected_options() {
+    let preferences = PromptPreferences {
+        image_mode: Some(ImageModePolicy {
+            size: "1024x1536".into(),
+            quality: "high".into(),
+            n: 2,
+            style_prompt: "ink painting".into(),
+            has_reference: false,
+        }),
+        ..Default::default()
+    };
+    let request = PromptBuilder::build_dsh(PromptBuildInput {
+        request_id: "r",
+        session_id: "s",
+        history: &[],
+        context: &RequestContext::default(),
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: Some("deepseek".into()),
+        preferences: &preferences,
+    });
+    let prompt = request
+        .messages
+        .iter()
+        .find(|message| message.id == "image-mode-s")
+        .expect("image mode policy must reach DeepSeek");
+    assert!(prompt
+        .content
+        .contains("Call `generate_image` exactly once"));
+    assert!(prompt.content.contains("size: `1024x1536`"));
+    assert!(prompt.content.contains("quality: `high`"));
+    assert!(prompt.content.contains("n: 2"));
+    assert!(prompt.content.contains("ink painting"));
+}
+
+#[test]
+fn collaboration_models_are_injected_only_when_configured() {
+    let context = RequestContext::default();
+    let preferences = PromptPreferences {
+        collaboration_models: vec![
+            r#"["deepseek","deepseek-v4-pro"]"#.into(),
+            "deepseek-v4-flash".into(),
+        ],
+        ..PromptPreferences::default()
+    };
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &preferences,
+    });
+    let collaboration = request
+        .messages
+        .iter()
+        .find(|message| message.id.starts_with("collaboration-models-"));
+    assert!(collaboration.is_some_and(|message| {
+        message.content.contains("- `deepseek-v4-pro`")
+            && message.content.contains("- `deepseek-v4-flash`")
+            && !message
+                .content
+                .contains("- `[\"deepseek\",\"deepseek-v4-pro\"]`")
+            && message.content.contains("Routing policy")
+            && message.content.contains("exact selected model ID")
+            && message.content.contains("Never omit `model`")
+            && message
+                .content
+                .contains("user-selected list defines eligibility only")
+            && !message.content.contains("general-purpose candidate")
+    }));
+
+    let default_preferences = PromptPreferences::default();
+    let without_models = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &default_preferences,
+    });
+    assert!(!without_models
+        .messages
+        .iter()
+        .any(|message| message.id.starts_with("collaboration-models-")));
+}
+
+#[test]
+fn image_mode_policy_is_injected_with_toolbar_values() {
+    let context = RequestContext::default();
+    let preferences = PromptPreferences {
+        image_mode: Some(ImageModePolicy {
+            size: "1024x1536".into(),
+            quality: "high".into(),
+            n: 2,
+            style_prompt: "anime illustration".into(),
+            has_reference: true,
+        }),
+        ..PromptPreferences::default()
+    };
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &preferences,
+    });
+    let block = request
+        .messages
+        .iter()
+        .find(|message| message.id.starts_with("image-mode-"))
+        .expect("image-mode system block");
+    assert!(block.content.contains("generate_image"));
+    assert!(block.content.contains("1024x1536"));
+    assert!(block.content.contains("high"));
+    assert!(block.content.contains("2"));
+    assert!(block.content.contains("anime illustration"));
+    assert!(block.content.contains("Mandatory visual style"));
+    assert!(block.content.contains("image-to-image"));
+    assert!(block
+        .content
+        .contains("A caption without a tool result is a lie"));
+}
+
+#[test]
+fn minimal_coding_is_injected_only_when_enabled() {
+    let context = RequestContext::default();
+    let enabled = PromptPreferences {
+        minimal_coding: true,
+        ..PromptPreferences::default()
+    };
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &enabled,
+    });
+    let block = request
+        .messages
+        .iter()
+        .find(|message| message.id.starts_with("minimal-coding-"));
+    assert!(block.is_some_and(|message| {
+        message.content.contains("Minimal coding mode")
+            && message.content.contains("YAGNI")
+            && message.content.contains("Never lazy about")
+    }));
+
+    let disabled = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &PromptPreferences::default(),
+    });
+    assert!(!disabled
+        .messages
+        .iter()
+        .any(|message| message.id.starts_with("minimal-coding-")));
+}
+
+#[test]
+fn plan_request_hint_is_injected_when_suggested() {
+    let context = RequestContext::default();
+    let enabled = PromptPreferences {
+        suggest_plan_request: true,
+        ..PromptPreferences::default()
+    };
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &enabled,
+    });
+    let block = request
+        .messages
+        .iter()
+        .find(|message| message.id.starts_with("plan-request-hint-"));
+    assert!(block.is_some_and(|message| message.content.contains("request_plan_mode")));
+
+    let already_planning = PromptPreferences {
+        plan_mode: true,
+        suggest_plan_request: true,
+        ..PromptPreferences::default()
+    };
+    let planning = PromptBuilder::build(PromptBuildInput {
+        request_id: "request",
+        session_id: "session",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &already_planning,
+    });
+    assert!(planning
+        .messages
+        .iter()
+        .any(|message| message.id.starts_with("plan-mode-")));
+    assert!(!planning
+        .messages
+        .iter()
+        .any(|message| message.id.starts_with("plan-request-hint-")));
+}
+
+#[test]
+fn injects_reasoning_language_for_chinese_user_text() {
+    let prefs = PromptPreferences {
+        app_language: AppLanguage::EnUs,
+        reasoning_language: ReasoningLanguage::Auto,
+        ..PromptPreferences::default()
+    };
+    let content = inject_language_blocks("帮我解释这段代码", &prefs);
+    assert!(content.starts_with("<reasoning-language>"));
+    assert!(content.contains("<response-language>"));
+    assert!(content.contains("必须使用简体中文"));
+    assert!(content.ends_with("帮我解释这段代码"));
+}
+
+#[test]
+fn auto_response_follows_chinese_message_even_when_ui_is_english() {
+    let prefs = PromptPreferences {
+        app_language: AppLanguage::EnUs,
+        reasoning_language: ReasoningLanguage::Auto,
+        ..PromptPreferences::default()
+    };
+    let content = inject_language_blocks("把这个 bug 修一下", &prefs);
+    assert!(content.contains("必须使用简体中文"));
+    assert!(!content.contains("use English for user-facing replies"));
+}
+
+#[test]
+fn auto_response_follows_english_message_even_when_ui_is_chinese() {
+    let prefs = PromptPreferences {
+        app_language: AppLanguage::ZhCn,
+        reasoning_language: ReasoningLanguage::Auto,
+        ..PromptPreferences::default()
+    };
+    let content = inject_language_blocks("Please explain this function", &prefs);
+    assert!(content.contains("use English for user-facing replies"));
+    assert!(!content.contains("必须使用简体中文"));
+}
+
+#[test]
+fn auto_reasoning_skips_english_only_prompt() {
+    let prefs = PromptPreferences {
+        app_language: AppLanguage::EnUs,
+        reasoning_language: ReasoningLanguage::Auto,
+        ..PromptPreferences::default()
+    };
+    let content = inject_language_blocks("Explain this snippet", &prefs);
+    assert!(!content.contains("<reasoning-language>"));
+    assert!(content.starts_with("<response-language>"));
+}
+
+#[test]
+fn workspace_context_identifies_the_exact_active_directory() {
+    let context = RequestContext {
+        workspace: Some(crate::core::runtime::request::WorkspaceContext {
+            name: "Customer App".to_string(),
+            root: r"C:\projects\customer-app".to_string(),
+        }),
+        active_window: Some("Peek - source code".to_string()),
+        ..RequestContext::default()
+    };
+    let mut messages = Vec::new();
+
+    inject_context(&mut messages, "session-1", &context);
+
+    assert_eq!(messages.len(), 1);
+    let content = &messages[0].content;
+    assert!(content.contains(
+        "[Current Workspace]\nName: Customer App\nRoot Directory: C:\\projects\\customer-app"
+    ));
+    assert!(content.contains("Do not infer another project"));
+    assert!(content.contains("MCP filesystem allow-lists"));
+    assert!(!content.contains("[Active Window]"));
+    let live = format_volatile_context(&context).expect("live context");
+    assert!(live.contains("[Active Window]\nPeek - source code"));
+}
+
+#[test]
+fn injects_environment_context_into_agent_prompt() {
+    let context = RequestContext {
+        git_status: Some("## main\n M src/main.rs".to_string()),
+        last_shell_execution: Some(
+            "Command: cargo test\nWorking Directory: C:\\work\nResult:\nexit_code: 0".to_string(),
+        ),
+        ..RequestContext::default()
+    };
+    let mut messages = Vec::new();
+
+    inject_context(&mut messages, "session-environment", &context);
+    assert!(messages.is_empty());
+
+    let live = format_volatile_context(&context).expect("live context");
+    assert!(live.contains("[Git Status]\n## main"));
+    assert!(live.contains("[Last Agent Shell Execution]\nCommand: cargo test"));
+}
+
+#[test]
+fn injects_ide_context_into_agent_prompt() {
+    use crate::core::context::models::{CursorPosition, IDEContext};
+    use std::path::PathBuf;
+
+    let context = RequestContext {
+        ide_context: Some(IDEContext {
+            ide: "vscode".to_string(),
+            active_file: Some(PathBuf::from(r"C:\project\src\main.rs")),
+            workspace: Some(PathBuf::from(r"C:\project")),
+            language: Some("rust".to_string()),
+            selection: Some("fn main() {}".to_string()),
+            cursor: Some(CursorPosition {
+                line: 15,
+                column: 5,
+            }),
+        }),
+        ..RequestContext::default()
+    };
+    let mut messages = Vec::new();
+
+    inject_context(&mut messages, "session-ide", &context);
+
+    let stable = &messages[0].content;
+    assert!(stable.contains("[IDE Context]"));
+    assert!(stable.contains("IDE:\nVSCode"));
+    assert!(stable.contains("Workspace:\n"));
+    assert!(!stable.contains("Line 15"));
+    assert!(!stable.contains("Selection:"));
+
+    let live = format_volatile_context(&context).expect("live ide");
+    assert!(live.contains("[IDE Live Context]"));
+    assert!(live.contains("Language:\nrust"));
+    assert!(live.contains("Line 15, Column 5"));
+    assert!(live.contains("Selection:\nfn main() {}"));
+}
+
+#[test]
+fn volatile_context_appends_to_current_user_message() {
+    let message = |id: &str, role: Role, content: &str| ChatMessage {
+        id: id.to_string(),
+        session_id: "session-1".to_string(),
+        role,
+        content: content.to_string(),
+        reasoning: None,
+        work_timeline: None,
+        tool_activities: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        status: MessageStatus::Done,
+        timestamp: 1,
+        estimated_tokens: None,
+    };
+    let history = vec![message("current-user", Role::User, "fix the bug")];
+    let context = RequestContext {
+        workspace: Some(crate::core::runtime::request::WorkspaceContext {
+            name: "Peek".to_string(),
+            root: r"D:\Code\Peek".to_string(),
+        }),
+        git_status: Some("## main\n M a.rs".to_string()),
+        clipboard: Some("copied".to_string()),
+        ..RequestContext::default()
+    };
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request-1",
+        session_id: "session-1",
+        history: &history,
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &PromptPreferences::default(),
+    });
+    assert!(request.messages[1].id.starts_with("context-"));
+    assert!(!request.messages[1].content.contains("[Git Status]"));
+    let user = request.messages.last().unwrap();
+    assert_eq!(user.id, "current-user");
+    assert!(user.content.contains("fix the bug"));
+    assert!(user.content.contains("[Git Status]\n## main"));
+    assert!(user.content.contains("[Clipboard]\ncopied"));
+}
+
+#[test]
+fn workspace_context_precedes_history_and_current_user() {
+    let message = |id: &str, role: Role, content: &str| ChatMessage {
+        id: id.to_string(),
+        session_id: "session-1".to_string(),
+        role,
+        content: content.to_string(),
+        reasoning: None,
+        work_timeline: None,
+        tool_activities: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        status: MessageStatus::Done,
+        timestamp: 1,
+        estimated_tokens: None,
+    };
+    let history = vec![
+        message("old-user", Role::User, "old question"),
+        message("old-assistant", Role::Assistant, "old answer"),
+        message("current-user", Role::User, "new question"),
+    ];
+    let context = RequestContext {
+        workspace: Some(crate::core::runtime::request::WorkspaceContext {
+            name: "Peek".to_string(),
+            root: r"D:\Code\Peek".to_string(),
+        }),
+        ..RequestContext::default()
+    };
+
+    let preferences = PromptPreferences::default();
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request-1",
+        session_id: "session-1",
+        history: &history,
+        context: &context,
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &preferences,
+    });
+
+    assert!(request.messages[0].id.starts_with("system-"));
+    assert!(request.messages[1].id.starts_with("context-"));
+    assert_eq!(request.messages[2].id, "old-user");
+    assert_eq!(request.messages.last().unwrap().id, "current-user");
+}
+
+#[test]
+fn prompt_keeps_empty_assistant_tool_calls_and_tool_results() {
+    use crate::core::runtime::ToolCallPayload;
+
+    let message = |id: &str, role: Role, content: &str| ChatMessage {
+        id: id.to_string(),
+        session_id: "session-1".to_string(),
+        role,
+        content: content.to_string(),
+        reasoning: None,
+        work_timeline: None,
+        tool_activities: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        status: MessageStatus::Done,
+        timestamp: 1,
+        estimated_tokens: None,
+    };
+    let mut assistant = message("a-tools", Role::Assistant, "");
+    assistant.tool_calls = Some(vec![ToolCallPayload {
+        id: "call-1".into(),
+        name: "read_file".into(),
+        arguments: r#"{"path":"a.rs"}"#.into(),
+        thought_signature: None,
+    }]);
+    let mut tool = message("t1", Role::Tool, "file contents");
+    tool.tool_call_id = Some("call-1".into());
+    let history = vec![
+        message("old-user", Role::User, "read the file"),
+        assistant,
+        tool,
+        message("current-user", Role::User, "now edit it"),
+    ];
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request-1",
+        session_id: "session-1",
+        history: &history,
+        context: &RequestContext::default(),
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &PromptPreferences::default(),
+    });
+    let ids: Vec<_> = request.messages.iter().map(|m| m.id.as_str()).collect();
+    assert!(ids.contains(&"a-tools"));
+    assert!(ids.contains(&"t1"));
+}
+
+#[test]
+fn recalled_memories_are_injected_as_untrusted_system_context() {
+    let context = RequestContext::default();
+    let preferences = PromptPreferences::default();
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request-1",
+        session_id: "session-1",
+        history: &[],
+        context: &context,
+        project_rules: None,
+        recalled_memories: Some("<relevant-memories>\nUses pnpm\n</relevant-memories>"),
+        preferred_resources: None,
+        provider: None,
+        preferences: &preferences,
+    });
+
+    assert_eq!(request.messages.len(), 2);
+    assert_eq!(request.messages[1].role, Role::System);
+    assert!(request.messages[1].content.contains("<relevant-memories>"));
+    assert!(request.messages[1].id.starts_with("memories-"));
+    assert!(request.messages[1].content.contains("Uses pnpm"));
+}
+
+#[test]
+fn project_rules_are_injected_as_system_context() {
+    let context = RequestContext::default();
+    let preferences = PromptPreferences::default();
+    let request = PromptBuilder::build(PromptBuildInput {
+        request_id: "request-1",
+        session_id: "session-1",
+        history: &[],
+        context: &context,
+        project_rules: Some("<project-rules>\nUse pnpm\n</project-rules>"),
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &preferences,
+    });
+
+    assert_eq!(request.messages[1].id, "rules-session-1");
+    assert!(request.messages[1].content.contains("Use pnpm"));
+}
+
+#[test]
+fn clipboard_context_is_hard_capped() {
+    let context = RequestContext {
+        clipboard: Some("Z".repeat(CLIPBOARD_MAX_CHARS + 500)),
+        ..RequestContext::default()
+    };
+    let live = format_volatile_context(&context).expect("clipboard live");
+    assert!(live.chars().count() <= CONTEXT_BLOCKS_TOTAL_MAX_CHARS);
+    assert!(live.contains('…') || live.contains("[Clipboard]"));
+    let clipboard_body = live.split("[Clipboard]\n").nth(1).unwrap_or_default();
+    assert!(clipboard_body.chars().count() <= CLIPBOARD_MAX_CHARS + 1);
+}
+
+#[test]
+fn preferred_resources_append_to_user_message_not_system_prefix() {
+    let history = [ChatMessage {
+        id: "u1".into(),
+        session_id: "s".into(),
+        role: Role::User,
+        content: "do the thing".into(),
+        reasoning: None,
+        work_timeline: None,
+        tool_activities: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        status: MessageStatus::Done,
+        timestamp: 1,
+        estimated_tokens: None,
+    }];
+    let without = PromptBuilder::build(PromptBuildInput {
+        request_id: "r",
+        session_id: "s",
+        history: &history,
+        context: &RequestContext::default(),
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: None,
+        provider: None,
+        preferences: &PromptPreferences::default(),
+    });
+    let with = PromptBuilder::build(PromptBuildInput {
+        request_id: "r",
+        session_id: "s",
+        history: &history,
+        context: &RequestContext::default(),
+        project_rules: None,
+        recalled_memories: None,
+        preferred_resources: Some("#skill:foo"),
+        provider: None,
+        preferences: &PromptPreferences::default(),
+    });
+    assert!(!with
+        .messages
+        .iter()
+        .any(|m| m.id.starts_with("preferred-resources-")));
+    assert_eq!(without.messages.len(), with.messages.len());
+    let user = with.messages.last().expect("user");
+    assert_eq!(user.role, Role::User);
+    assert!(user.content.contains("do the thing"));
+    assert!(user.content.contains("#skill:foo"));
+    assert_eq!(without.messages[0].id, with.messages[0].id);
+}
+
+#[test]
+fn optional_policies_never_shift_stable_prefix_slots() {
+    let context = RequestContext {
+        workspace: Some(crate::core::runtime::request::WorkspaceContext {
+            name: "Demo".to_string(),
+            root: r"C:\demo".to_string(),
+        }),
+        ..RequestContext::default()
+    };
+    let rules = Some("<project-rules>\nUse pnpm\n</project-rules>");
+    let memories = Some("<relevant-memories>\nUses pnpm\n</relevant-memories>");
+
+    let baseline = PromptBuilder::build(PromptBuildInput {
+        request_id: "r",
+        session_id: "s",
+        history: &[],
+        context: &context,
+        project_rules: rules,
+        recalled_memories: memories,
+        preferred_resources: None,
+        provider: None,
+        preferences: &PromptPreferences::default(),
+    });
+    let with_optional = PromptBuilder::build(PromptBuildInput {
+        request_id: "r",
+        session_id: "s",
+        history: &[],
+        context: &context,
+        project_rules: rules,
+        recalled_memories: memories,
+        preferred_resources: None,
+        provider: None,
+        preferences: &PromptPreferences {
+            collaboration_models: vec!["model-a".into()],
+            minimal_coding: true,
+            ..PromptPreferences::default()
+        },
+    });
+
+    // Slots [0]–[2] keep the same ids and relative order regardless of toggles.
+    for i in 0..3 {
+        assert_eq!(baseline.messages[i].id, with_optional.messages[i].id);
+    }
+    assert!(baseline.messages[0].id.starts_with("system-"));
+    assert_eq!(baseline.messages[1].id, "context-s");
+    assert_eq!(baseline.messages[2].id, "rules-s");
+    assert_eq!(baseline.messages[3].id, "memories-s");
+
+    // Optional policies only appear after the stable prefix.
+    let optional_ids: Vec<_> = with_optional
+        .messages
+        .iter()
+        .skip(3)
+        .map(|m| m.id.as_str())
+        .collect();
+    assert!(optional_ids
+        .iter()
+        .any(|id| id.starts_with("collaboration-models-")));
+    assert!(optional_ids
+        .iter()
+        .any(|id| id.starts_with("minimal-coding-")));
+    assert!(!baseline
+        .messages
+        .iter()
+        .any(|m| m.id.starts_with("collaboration-models-") || m.id.starts_with("minimal-coding-")));
+}
+
+#[test]
+fn changing_recalled_memory_preserves_prior_history_prefix() {
+    let context = RequestContext::default();
+    let preferences = PromptPreferences::default();
+    let history = vec![super::slots::system_message("old")];
+    let build = |memory| {
+        PromptBuilder::build(PromptBuildInput {
+            request_id: "r",
+            session_id: "s",
+            history: &history,
+            context: &context,
+            project_rules: None,
+            recalled_memories: Some(memory),
+            preferred_resources: None,
+            provider: None,
+            preferences: &preferences,
+        })
+    };
+    let first = build("memory one");
+    let second = build("memory two");
+    let index = first
+        .messages
+        .iter()
+        .position(|m| m.id == "memories-s")
+        .unwrap();
+    assert!(first.messages[..index].iter().any(|m| m.id == "system-old"));
+    assert_eq!(first.messages[..index], second.messages[..index]);
+    assert_ne!(
+        first.messages[index].content,
+        second.messages[index].content
+    );
+}

@@ -1,0 +1,395 @@
+import type { AppInfo } from "@/types/app";
+import type {
+  AgentDebugEvent,
+  ChatCancelRequest,
+  CapturedContext,
+  ChatDeltaEvent,
+  ChatErrorEvent,
+  ChatFinishedEvent,
+  ChatHistoryRequest,
+  ChatHistoryResponse,
+  ChatModelInfo,
+  ChatReasoningEvent,
+  ChatSendRequest,
+  ChatSendResponse,
+  ChatStartedEvent,
+  ChatStatusEvent,
+  ChatUserContentEvent,
+  ContextUsageRequest,
+  ContextUsageResponse,
+  ListChatSessionsResponse,
+  RespondAskUserRequest,
+  PendingInteractionsSnapshot,
+  RespondPathPermissionRequest,
+  RespondToolApprovalRequest,
+  CheckpointInfo,
+  RewindSessionRequest,
+  RewindSessionResponse,
+  ChatSessionSummary,
+} from "@/types/chat";
+import { IPC_COMMANDS } from "@/types/ipc";
+import type { AppSettings, AppSettingsPatch } from "@/types/setting";
+import type {
+  TokenUsageReport,
+  DeepSeekBalanceReport,
+  DeepSeekFileList,
+  DeepSeekFileObject,
+  DeepSeekFileDeleteResult,
+} from "@/types/tokenUsage";
+import { invoke } from "@tauri-apps/api/core";
+
+export function ipcInvoke<TResponse>(
+  command: string,
+  payload?: Record<string, unknown>,
+): Promise<TResponse> {
+  return payload ? invoke<TResponse>(command, payload) : invoke<TResponse>(command);
+}
+
+export function openSettings() {
+  return ipcInvoke<void>(IPC_COMMANDS.openSettings);
+}
+
+export function openSessionInOverlay(sessionId: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.openSessionInOverlay, {
+    sessionId,
+    session_id: sessionId,
+  });
+}
+
+export function openSessionInWorkbench(sessionId: string, overlayLabel: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.openSessionInWorkbench, {
+    sessionId,
+    overlayLabel,
+  });
+}
+
+export function showInteractionNotification(request: {
+  sessionId: string;
+  requestId?: string;
+  title: string;
+  body: string;
+  ignoreLabel: string;
+  openLabel: string;
+  persistent?: boolean;
+}) {
+  return ipcInvoke<void>(IPC_COMMANDS.showInteractionNotification, { request });
+}
+
+export function dismissInteractionNotification(request: {
+  sessionId?: string;
+  requestId?: string;
+}) {
+  return ipcInvoke<void>(IPC_COMMANDS.dismissInteractionNotification, { request });
+}
+
+export function setWindowSessionView(sessionId?: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.setWindowSessionView, {
+    sessionId: sessionId || null,
+  });
+}
+
+export function hideOverlay(label?: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.hideOverlay, label ? { label } : undefined);
+}
+
+export function minimizeOverlay(label?: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.minimizeOverlay, label ? { label } : undefined);
+}
+
+export function closeOverlay(label: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.closeOverlay, { label });
+}
+
+export function exitApp() {
+  return ipcInvoke<void>(IPC_COMMANDS.exitApp);
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  // WebViews can reach IPC before setup has registered SettingsState.
+  // Keep the boot splash up until the real settings (including themes) arrive.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await ipcInvoke<AppSettings>(IPC_COMMANDS.getAppSettings);
+    } catch (error) {
+      if (String(error) !== "settings state is unavailable" || attempt >= 100) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+export function listSystemFonts() {
+  return ipcInvoke<string[]>(IPC_COMMANDS.listSystemFonts);
+}
+
+export function setAppSettings(patch: AppSettingsPatch) {
+  return ipcInvoke<AppSettings>(IPC_COMMANDS.setAppSettings, { patch });
+}
+
+export function getAppInfo() {
+  return ipcInvoke<AppInfo>(IPC_COMMANDS.getAppInfo);
+}
+
+export function webviewGpuDisabled() {
+  return ipcInvoke<boolean>(IPC_COMMANDS.webviewGpuDisabled);
+}
+
+export function relaunchApp() {
+  return ipcInvoke<void>(IPC_COMMANDS.relaunchApp);
+}
+
+export function chat(request: ChatSendRequest) {
+  return ipcInvoke<ChatSendResponse>(IPC_COMMANDS.chat, { request });
+}
+
+export function chatCancel(request: ChatCancelRequest) {
+  return ipcInvoke<void>(IPC_COMMANDS.chatCancel, { request });
+}
+
+export function getAgentDebugSnapshot() {
+  return ipcInvoke<AgentDebugEvent[]>(IPC_COMMANDS.agentDebugSnapshot);
+}
+
+export function chatHistory(request: ChatHistoryRequest = {}) {
+  return ipcInvoke<ChatHistoryResponse>(IPC_COMMANDS.chatHistory, { request });
+}
+
+export function listChatSessions() {
+  return ipcInvoke<ListChatSessionsResponse>(IPC_COMMANDS.listChatSessions);
+}
+
+export function listArchivedChatSessions() {
+  return ipcInvoke<ListChatSessionsResponse>(IPC_COMMANDS.listArchivedChatSessions);
+}
+
+export function listChatModels() {
+  return ipcInvoke<ChatModelInfo[]>(IPC_COMMANDS.listChatModels);
+}
+
+export function listDeepSeekModels(apiKey: string) {
+  return ipcInvoke<string[]>(IPC_COMMANDS.listDeepSeekModels, {
+    apiKey,
+  });
+}
+
+export function listCustomProviderModels(baseUrl: string, apiKey: string) {
+  return ipcInvoke<string[]>(IPC_COMMANDS.listCustomProviderModels, {
+    baseUrl,
+    apiKey,
+  });
+}
+
+export function getContextUsage(request: ContextUsageRequest = {}) {
+  return ipcInvoke<ContextUsageResponse>(IPC_COMMANDS.getContextUsage, {
+    request,
+  });
+}
+
+export function getTokenUsageReport(request: {
+  from?: number;
+  to?: number;
+  granularity: "day" | "week" | "month";
+}) {
+  return ipcInvoke<TokenUsageReport>(IPC_COMMANDS.getTokenUsageReport, {
+    request,
+  });
+}
+
+/** DeepSeek account balance from GET /user/balance. */
+export function getDeepSeekBalance() {
+  return ipcInvoke<DeepSeekBalanceReport>(IPC_COMMANDS.getDeepSeekBalance);
+}
+
+/** DeepSeek POST /files — upload an image for `file_id` citation. */
+export function uploadDeepSeekFile(path: string) {
+  return ipcInvoke<DeepSeekFileObject>(IPC_COMMANDS.uploadDeepSeekFile, { path });
+}
+
+/** DeepSeek GET /files. */
+export function listDeepSeekFiles(after?: string, limit?: number) {
+  const payload: Record<string, unknown> = {};
+  if (after) payload.after = after;
+  if (limit != null) payload.limit = limit;
+  return ipcInvoke<DeepSeekFileList>(IPC_COMMANDS.listDeepSeekFiles, payload);
+}
+
+/** DeepSeek GET /files/:file_id. */
+export function retrieveDeepSeekFile(fileId: string) {
+  return ipcInvoke<DeepSeekFileObject>(IPC_COMMANDS.retrieveDeepSeekFile, {
+    fileId,
+    file_id: fileId,
+  });
+}
+
+/** DeepSeek DELETE /files/:file_id. */
+export function deleteDeepSeekFile(fileId: string) {
+  return ipcInvoke<DeepSeekFileDeleteResult>(IPC_COMMANDS.deleteDeepSeekFile, {
+    fileId,
+    file_id: fileId,
+  });
+}
+
+export function getEnvironmentContext() {
+  return ipcInvoke<CapturedContext>(IPC_COMMANDS.getEnvironmentContext);
+}
+
+export function deleteChatSession(sessionId: string) {
+  return ipcInvoke<void>("delete_chat_session", { sessionId });
+}
+
+export function branchChatSession(sessionId: string, messageId?: string) {
+  return ipcInvoke<ChatSessionSummary>(IPC_COMMANDS.branchChatSession, {
+    sessionId,
+    session_id: sessionId,
+    messageId,
+    message_id: messageId,
+  });
+}
+
+export function setChatSessionTitle(sessionId: string, title: string) {
+  return ipcInvoke<string>(IPC_COMMANDS.setChatSessionTitle, {
+    sessionId,
+    session_id: sessionId,
+    title,
+  });
+}
+
+export function regenerateChatSessionTitle(
+  sessionId: string,
+  modelId?: string,
+  modelProvider?: string,
+) {
+  return ipcInvoke<string>(IPC_COMMANDS.regenerateChatSessionTitle, {
+    sessionId,
+    session_id: sessionId,
+    modelId,
+    model_id: modelId,
+    modelProvider,
+    model_provider: modelProvider,
+  });
+}
+
+export function setChatSessionArchived(sessionId: string, archived: boolean) {
+  return ipcInvoke<void>("set_chat_session_archived", { sessionId, archived });
+}
+
+export function setChatSessionWorkspace(sessionId: string, workspaceId: string) {
+  return ipcInvoke<void>("set_chat_session_workspace", { sessionId, workspaceId });
+}
+
+export function clearAllChatSessions() {
+  return ipcInvoke<void>("clear_all_chat_sessions");
+}
+
+export function setOverlayChatMode(label: string, enabled: boolean) {
+  return ipcInvoke<void>(IPC_COMMANDS.setOverlayChatMode, { label, enabled });
+}
+
+export function expandOverlayForChat(zoom: number) {
+  return ipcInvoke<void>("expand_overlay_for_chat", { zoom });
+}
+
+export function resizeOverlayInput(height: number, zoom: number) {
+  return ipcInvoke<void>("resize_overlay_input", { height, zoom });
+}
+
+export function setOverlayPopupOpen(label: string, open: boolean) {
+  return ipcInvoke<void>(IPC_COMMANDS.setOverlayPopupOpen, { label, open });
+}
+
+export function takeOverlayContext(label: string) {
+  return ipcInvoke<CapturedContext | null>(IPC_COMMANDS.takeOverlayContext, {
+    label,
+  });
+}
+
+export function openImagePreview(pathOrBase64: string) {
+  return ipcInvoke<void>("open_image_preview", {
+    pathOrBase64,
+    path_or_base64: pathOrBase64,
+  });
+}
+
+export function getPreviewImage() {
+  return ipcInvoke<string>("get_preview_image");
+}
+
+export function respondAskUser(request: RespondAskUserRequest) {
+  return ipcInvoke<void>(IPC_COMMANDS.respondAskUser, { request });
+}
+
+export function getPendingInteractions(sessionId: string) {
+  return ipcInvoke<PendingInteractionsSnapshot>(IPC_COMMANDS.getPendingInteractions, { sessionId });
+}
+
+export function respondPathPermission(request: RespondPathPermissionRequest) {
+  return ipcInvoke<void>(IPC_COMMANDS.respondPathPermission, { request });
+}
+
+export function respondToolApproval(request: RespondToolApprovalRequest) {
+  return ipcInvoke<void>(IPC_COMMANDS.respondToolApproval, { request });
+}
+
+export function setPlanMode(
+  sessionId: string,
+  active: boolean,
+  source: "auto" | "manual" = "manual",
+) {
+  return ipcInvoke<void>(IPC_COMMANDS.setPlanMode, {
+    request: { sessionId, active, source },
+  });
+}
+
+export function getPlanMode(sessionId: string) {
+  return ipcInvoke<boolean>(IPC_COMMANDS.getPlanMode, {
+    request: { sessionId },
+  });
+}
+
+export function listCheckpoints(sessionId: string) {
+  return ipcInvoke<CheckpointInfo[]>(IPC_COMMANDS.listCheckpoints, {
+    request: { sessionId },
+  });
+}
+
+export function rewindSession(request: RewindSessionRequest) {
+  return ipcInvoke<RewindSessionResponse>(IPC_COMMANDS.rewindSession, {
+    request,
+  });
+}
+
+/** Return the current workspace's uncommitted unified diff (staged, unstaged, untracked). */
+export function workingTreeDiff() {
+  return ipcInvoke<string>(IPC_COMMANDS.workingTreeDiff);
+}
+
+export function revealInExplorer(path: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.revealInExplorer, { path });
+}
+
+export function openInDefaultApp(path: string) {
+  return ipcInvoke<void>(IPC_COMMANDS.openInDefaultApp, { path });
+}
+
+/** 结束 Computer Use HUD，并取消进行中的对话流。 */
+export function dismissComputerUseHud() {
+  return ipcInvoke<void>(IPC_COMMANDS.dismissComputerUseHud);
+}
+
+export type {
+  AppInfo,
+  AppSettings,
+  AppSettingsPatch,
+  ChatCancelRequest,
+  ChatDeltaEvent,
+  ChatErrorEvent,
+  ChatFinishedEvent,
+  ChatHistoryRequest,
+  ChatHistoryResponse,
+  ChatModelInfo,
+  ChatReasoningEvent,
+  ChatSendRequest,
+  ChatSendResponse,
+  ChatStartedEvent,
+  ChatStatusEvent,
+  ChatUserContentEvent,
+};

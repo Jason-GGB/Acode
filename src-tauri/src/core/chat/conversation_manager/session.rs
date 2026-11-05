@@ -1,0 +1,497 @@
+use std::collections::HashMap;
+
+use crate::core::chat::limits::estimate_message_tokens;
+use crate::core::runtime::Role;
+use crate::models::chat::ChatSessionSummary;
+
+use super::super::session_title::{
+    fallback_session_title, normalize_session_title, SessionTitleSource, FALLBACK_MAX_BYTES,
+    FALLBACK_MAX_WORDS, MAX_TITLE_BYTES,
+};
+use super::helpers::{
+    block_on_compat, clean_assistant_summary, is_plugin_agent_session_id, is_trivial_user_text,
+    session_preview,
+};
+use super::ConversationManager;
+
+impl ConversationManager {
+    pub fn bind_workspace(&self, session_id: &str, workspace_id: &str) {
+        if let Ok(mut workspaces) = self.session_workspaces.lock() {
+            workspaces
+                .entry(session_id.to_string())
+                .or_insert_with(|| workspace_id.to_string());
+        }
+        let pool = self.db_pool.clone();
+        let session_id = session_id.to_string();
+        let workspace_id = workspace_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) =
+                super::super::db::bind_session_workspace(&pool, &session_id, &workspace_id).await
+            {
+                eprintln!("Failed to bind chat session workspace: {error}");
+            }
+        });
+    }
+
+    pub async fn rebind_workspace(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), String> {
+        let previous = self
+            .session_workspaces
+            .lock()
+            .ok()
+            .and_then(|workspaces| workspaces.get(session_id).cloned());
+        if let Ok(mut workspaces) = self.session_workspaces.lock() {
+            workspaces.insert(session_id.to_string(), workspace_id.to_string());
+        }
+        if let Err(error) =
+            super::super::db::set_session_workspace(&self.db_pool, session_id, workspace_id).await
+        {
+            if let Ok(mut workspaces) = self.session_workspaces.lock() {
+                match previous {
+                    Some(workspace) => {
+                        workspaces.insert(session_id.to_string(), workspace);
+                    }
+                    None => {
+                        workspaces.remove(session_id);
+                    }
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn workspace_for_session(&self, session_id: &str) -> Option<String> {
+        self.session_workspaces
+            .lock()
+            .ok()
+            .and_then(|workspaces| workspaces.get(session_id).cloned())
+    }
+
+    pub fn set_session_title(&self, session_id: &str, title: String, source: SessionTitleSource) {
+        let title = normalize_session_title(&title, MAX_TITLE_BYTES);
+        if title.is_empty() {
+            return;
+        }
+        if let Ok(mut titles) = self.session_titles.lock() {
+            titles.insert(session_id.to_string(), title.clone());
+        }
+        if let Ok(mut sources) = self.session_title_sources.lock() {
+            sources.insert(session_id.to_string(), source);
+        }
+        let pool = self.db_pool.clone();
+        let session_id = session_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) =
+                super::super::db::save_session_title(&pool, &session_id, &title, source).await
+            {
+                eprintln!("Failed to save chat session title: {error}");
+            }
+        });
+    }
+
+    pub fn session_title_source(&self, session_id: &str) -> Option<SessionTitleSource> {
+        self.session_title_sources
+            .lock()
+            .ok()
+            .and_then(|sources| sources.get(session_id).copied())
+    }
+
+    /// Whether automatic title generation may overwrite the current title.
+    pub fn can_auto_update_title(&self, session_id: &str) -> bool {
+        self.session_title_source(session_id) != Some(SessionTitleSource::User)
+    }
+
+    /// Persist a deterministic fallback title after the first eligible user message.
+    pub fn ensure_fallback_title(&self, session_id: &str, user_text: &str) -> Option<String> {
+        if !self.can_auto_update_title(session_id) {
+            return None;
+        }
+        let user_turn_count = self
+            .messages(session_id)
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count();
+        if user_turn_count != 1 {
+            return None;
+        }
+        let title = fallback_session_title(user_text, FALLBACK_MAX_WORDS, FALLBACK_MAX_BYTES);
+        if title.is_empty() {
+            return None;
+        }
+        if self.session_title(session_id).as_deref() == Some(title.as_str())
+            && self.session_title_source(session_id) == Some(SessionTitleSource::Fallback)
+        {
+            return None;
+        }
+        self.set_session_title(session_id, title.clone(), SessionTitleSource::Fallback);
+        Some(title)
+    }
+
+    /// Accept an explicit user title and pin it against automatic updates.
+    pub fn rename_session_title(&self, session_id: &str, title: &str) -> Result<String, String> {
+        let normalized = normalize_session_title(title, MAX_TITLE_BYTES);
+        if normalized.is_empty() {
+            return Err("会话标题不能为空".into());
+        }
+        self.set_session_title(session_id, normalized.clone(), SessionTitleSource::User);
+        Ok(normalized)
+    }
+
+    /// Returns the primary substantive user message for title fallback and topic anchoring.
+    pub fn primary_user_text_for_title(&self, session_id: &str) -> Option<String> {
+        let messages = self.messages(session_id);
+        let user_texts: Vec<String> = messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .map(|m| super::super::selection::user_text_for_title_context(&m.content))
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+
+        for text in &user_texts {
+            if !is_trivial_user_text(text) {
+                return Some(text.clone());
+            }
+        }
+        user_texts.into_iter().next()
+    }
+
+    /// Extracts structured conversation context designed to prevent off-topic title generation.
+    pub fn session_context_for_title(&self, session_id: &str) -> Option<String> {
+        let messages = self.messages(session_id);
+        if messages.is_empty() {
+            return None;
+        }
+
+        let primary_goal = self.primary_user_text_for_title(session_id);
+        let mut lines = Vec::new();
+        if let Some(goal) = &primary_goal {
+            let truncated_goal = super::super::limits::truncate_chars(goal, 300);
+            lines.push(format!(
+                "Primary Goal:\n{truncated_goal}\n\nConversation Flow:"
+            ));
+        }
+
+        let mut turns: Vec<(&'static str, String)> = Vec::new();
+        for msg in &messages {
+            match msg.role {
+                Role::User => {
+                    let text = super::super::selection::user_text_for_title_context(&msg.content);
+                    if !text.trim().is_empty() && !is_trivial_user_text(&text) {
+                        turns.push(("User", super::super::limits::truncate_chars(&text, 250)));
+                    }
+                }
+                Role::Assistant => {
+                    let summary = clean_assistant_summary(&msg.content, 120);
+                    if !summary.trim().is_empty() {
+                        turns.push(("Assistant", summary));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if turns.is_empty() {
+            return primary_goal.map(|goal| format!("User: {goal}"));
+        }
+
+        let slice: Vec<&(&'static str, String)> = if turns.len() <= 6 {
+            turns.iter().collect()
+        } else {
+            turns
+                .iter()
+                .take(2)
+                .chain(turns.iter().skip(turns.len() - 4))
+                .collect()
+        };
+
+        for (prefix, text) in slice {
+            lines.push(format!("{prefix}: {text}"));
+        }
+
+        let full_text = lines.join("\n");
+        if full_text.trim().is_empty() {
+            None
+        } else {
+            Some(super::super::limits::truncate_chars(&full_text, 1200))
+        }
+    }
+
+    pub fn session_title(&self, session_id: &str) -> Option<String> {
+        self.session_titles
+            .lock()
+            .ok()
+            .and_then(|titles| titles.get(session_id).cloned())
+    }
+
+    pub fn list_sessions(&self) -> Vec<ChatSessionSummary> {
+        self.list_sessions_filtered(false)
+    }
+
+    pub fn list_archived_sessions(&self) -> Vec<ChatSessionSummary> {
+        self.list_sessions_filtered(true)
+    }
+
+    fn list_sessions_filtered(&self, archived: bool) -> Vec<ChatSessionSummary> {
+        let pool = self.db_pool.clone();
+        let mut summaries = block_on_compat(async move {
+            super::super::db::load_session_summaries(&pool)
+                .await
+                .unwrap_or_default()
+        });
+
+        let session_workspaces = self
+            .session_workspaces
+            .lock()
+            .map(|workspaces| workspaces.clone())
+            .unwrap_or_default();
+        let session_archived = self
+            .session_archived
+            .lock()
+            .map(|archived| archived.clone())
+            .unwrap_or_default();
+        let session_titles = self
+            .session_titles
+            .lock()
+            .map(|titles| titles.clone())
+            .unwrap_or_default();
+
+        // Overlay in-memory loaded sessions so an active stream's preview /
+        // counts stay accurate before the terminal SQLite flush.
+        if let Ok(sessions) = self.sessions.lock() {
+            let mut by_id: HashMap<String, usize> = summaries
+                .iter()
+                .enumerate()
+                .map(|(index, summary)| (summary.session_id.clone(), index))
+                .collect();
+
+            for (session_id, messages) in sessions.iter() {
+                if messages.is_empty() {
+                    continue;
+                }
+                let preview = self
+                    .session_title(session_id)
+                    .unwrap_or_else(|| session_preview(messages));
+                let updated_at = messages
+                    .iter()
+                    .map(|message| message.timestamp)
+                    .max()
+                    .unwrap_or(0);
+                let turn_count = messages
+                    .iter()
+                    .filter(|message| message.role == Role::User)
+                    .count();
+                let estimated_tokens = messages
+                    .iter()
+                    .map(|message| {
+                        message
+                            .estimated_tokens
+                            .unwrap_or_else(|| estimate_message_tokens(message))
+                    })
+                    .sum::<usize>()
+                    + self.consumed_tokens(session_id);
+                let summary = ChatSessionSummary {
+                    session_id: session_id.clone(),
+                    workspace_id: session_workspaces.get(session_id).cloned().or_else(|| {
+                        summaries
+                            .iter()
+                            .find(|item| item.session_id == *session_id)
+                            .and_then(|item| item.workspace_id.clone())
+                    }),
+                    preview,
+                    message_count: messages.len(),
+                    turn_count,
+                    estimated_tokens,
+                    updated_at,
+                    archived: session_archived.contains(session_id),
+                };
+                if let Some(index) = by_id.get(session_id).copied() {
+                    summaries[index] = summary;
+                } else {
+                    by_id.insert(session_id.clone(), summaries.len());
+                    summaries.push(summary);
+                }
+            }
+        }
+
+        for summary in summaries.iter_mut() {
+            summary.archived = session_archived.contains(&summary.session_id);
+            if let Some(workspace_id) = session_workspaces.get(&summary.session_id) {
+                summary.workspace_id = Some(workspace_id.clone());
+            }
+            if let Some(title) = session_titles.get(&summary.session_id) {
+                summary.preview = title.clone();
+            }
+        }
+
+        summaries.retain(|summary| {
+            summary.archived == archived && !is_plugin_agent_session_id(&summary.session_id)
+        });
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        summaries
+    }
+
+    pub fn set_session_archived(&self, session_id: &str, archived: bool) {
+        if let Ok(mut set) = self.session_archived.lock() {
+            if archived {
+                set.insert(session_id.to_string());
+            } else {
+                set.remove(session_id);
+            }
+        }
+        let pool = self.db_pool.clone();
+        let sid = session_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = super::super::db::set_session_archived(&pool, &sid, archived).await
+            {
+                eprintln!("Failed to persist session archive state for {sid}: {error}");
+            }
+        });
+    }
+
+    pub fn set_sessions_archived_for_workspace(&self, workspace_id: &str, archived: bool) {
+        let session_ids: Vec<String> = if archived {
+            self.list_sessions()
+        } else {
+            self.list_archived_sessions()
+        }
+        .into_iter()
+        .filter(|session| session.workspace_id.as_deref() == Some(workspace_id))
+        .map(|session| session.session_id)
+        .collect();
+        if session_ids.is_empty() {
+            return;
+        }
+
+        if let Ok(mut set) = self.session_archived.lock() {
+            for session_id in &session_ids {
+                if archived {
+                    set.insert(session_id.clone());
+                } else {
+                    set.remove(session_id);
+                }
+            }
+        }
+
+        let pool = self.db_pool.clone();
+        let workspace_id = workspace_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) =
+                super::super::db::set_sessions_archived_batch(&pool, &session_ids, archived).await
+            {
+                eprintln!("Failed to persist workspace archive state for {workspace_id}: {error}");
+            }
+        });
+    }
+
+    pub fn delete_session(&self, session_id: &str) {
+        crate::core::tools::dsh::clear_session(session_id);
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(session_id);
+        }
+        if let Ok(mut loaded) = self.loaded_sessions.lock() {
+            loaded.remove(session_id);
+        }
+        if let Ok(mut workspaces) = self.session_workspaces.lock() {
+            workspaces.remove(session_id);
+        }
+        if let Ok(mut titles) = self.session_titles.lock() {
+            titles.remove(session_id);
+        }
+        if let Ok(mut sources) = self.session_title_sources.lock() {
+            sources.remove(session_id);
+        }
+        if let Ok(mut archived) = self.session_archived.lock() {
+            archived.remove(session_id);
+        }
+
+        let pool = self.db_pool.clone();
+        let sid = session_id.to_string();
+        self.journal.discard_session(session_id);
+        tauri::async_runtime::spawn(async move {
+            let result = async {
+                let mut transaction = pool.begin().await?;
+                sqlx::query("DELETE FROM chat_journal_events WHERE session_id = ?;")
+                    .bind(&sid)
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM chat_permission_events WHERE session_id = ?")
+                    .bind(&sid)
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM chat_messages WHERE session_id = ?;")
+                    .bind(&sid)
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM chat_sessions WHERE session_id = ?;")
+                    .bind(&sid)
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                // No-op for legacy databases; new databases use incremental
+                // auto-vacuum so deletion can return a bounded batch.
+                sqlx::query("PRAGMA incremental_vacuum(1024)")
+                    .execute(&pool)
+                    .await?;
+                Ok::<(), sqlx::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!("Failed to delete session {sid} from SQLite: {error}");
+            }
+        });
+    }
+
+    pub fn clear_all_sessions(&self) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.clear();
+        }
+        if let Ok(mut loaded) = self.loaded_sessions.lock() {
+            loaded.clear();
+        }
+        if let Ok(mut workspaces) = self.session_workspaces.lock() {
+            workspaces.clear();
+        }
+        if let Ok(mut titles) = self.session_titles.lock() {
+            titles.clear();
+        }
+        if let Ok(mut sources) = self.session_title_sources.lock() {
+            sources.clear();
+        }
+        if let Ok(mut archived) = self.session_archived.lock() {
+            archived.clear();
+        }
+
+        let pool = self.db_pool.clone();
+        self.journal.discard_all();
+        tauri::async_runtime::spawn(async move {
+            let result = async {
+                let mut transaction = pool.begin().await?;
+                sqlx::query("DELETE FROM chat_journal_events")
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM chat_permission_events")
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM chat_messages")
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM chat_sessions")
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                sqlx::query("PRAGMA incremental_vacuum(1024)")
+                    .execute(&pool)
+                    .await?;
+                Ok::<(), sqlx::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!("Failed to clear chat history in SQLite: {error}");
+            }
+        });
+    }
+}

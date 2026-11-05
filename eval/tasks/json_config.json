@@ -1,0 +1,51 @@
+{
+  "id": "json_config",
+  "prompt": "Set package.json name to acode-eval.",
+  "setupFiles": [
+    {
+      "path": "package.json",
+      "content": "{\"name\": \"old\", \"scripts\": {\"check\": \"node -e \\\"if(require('./package.json').name !== 'acode-eval') process.exit(1)\\\"\"}}"
+    }
+  ],
+  "script": [
+    {
+      "content": "",
+      "tool_calls": [
+        {
+          "name": "replace_in_file",
+          "arguments": {
+            "path": "package.json",
+            "old_string": "\"name\": \"old\"",
+            "new_string": "\"name\": \"acode-eval\""
+          }
+        }
+      ]
+    },
+    {
+      "content": "",
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "arguments": {
+            "path": "package.json"
+          }
+        }
+      ]
+    },
+    {
+      "content": "任务完成",
+      "tool_calls": []
+    }
+  ],
+  "assertions": [
+    {
+      "type": "fileContains",
+      "path": "package.json",
+      "text": "acode-eval"
+    },
+    {
+      "type": "finishReason",
+      "reason": "stop"
+    }
+  ]
+}

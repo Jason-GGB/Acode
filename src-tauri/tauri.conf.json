@@ -1,0 +1,135 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Acode",
+  "version": "0.2.34",
+  "identifier": "ai.acode.desktop",
+  "build": {
+    "beforeDevCommand": "node scripts/fetch-rg.mjs && node scripts/fetch-deno.mjs && pnpm build:office-runtime && pnpm dev",
+    "devUrl": "http://localhost:13330",
+    "beforeBuildCommand": "node scripts/fetch-rg.mjs && node scripts/fetch-deno.mjs && pnpm build:office-runtime && pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "overlay",
+        "title": "Acode",
+        "url": "/#/overlay",
+        "width": 640,
+        "height": 86,
+        "minWidth": 640,
+        "minHeight": 86,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "center": true,
+        "focus": false,
+        "resizable": false,
+        "maximizable": false
+      },
+      {
+        "label": "workbench",
+        "title": "Acode",
+        "url": "/#/workbench",
+        "width": 2170,
+        "height": 1210,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "alwaysOnTop": false,
+        "visible": false,
+        "skipTaskbar": false,
+        "center": true,
+        "focus": true,
+        "resizable": true,
+        "maximizable": true
+      },
+      {
+        "label": "computer-use-hud",
+        "title": "Acode Computer Use",
+        "url": "/#/computer-use-hud",
+        "width": 800,
+        "height": 600,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "center": false,
+        "focus": false,
+        "resizable": false,
+        "maximizable": false
+      },
+      {
+        "label": "computer-use-banner",
+        "title": "Acode Computer Use Banner",
+        "url": "/#/computer-use-banner",
+        "width": 420,
+        "height": 52,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "center": false,
+        "focus": false,
+        "resizable": false,
+        "maximizable": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPCACHE/image-preview/**",
+          "$APPCACHE/icons/**",
+          "$APPDATA/generated/**",
+          "$APPDATA/companion-inbox/**",
+          "**/.acode/uploads/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": [
+      "msi"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/rg",
+      "binaries/deno"
+    ],
+    "resources": {
+      "resources/office/": "office/"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBMTE5MTc3MDBERjBFRDQKUldUVUR0OEFkNUVSZXJ3Rm8rNnVvLy93c3R3eUhJY2FnMEhGK2pZQzZnWWQ1MDJ0MHdKNjhhN3cK",
+      "endpoints": [
+        "https://github.com/rururunu/Acode/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" style="color-scheme: only light">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/mascot/mascot-icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Acode</title>
+    <script>
+      // Paint boot splash with the last known theme before settings IPC returns.
+      // Overlay / peek windows must never show the workbench logo splash — they
+      // are ~84px tall and often shown while the document is still booting.
+      (function () {
+        try {
+          var hash = String(location.hash || "");
+          var href = String(location.href || "");
+          var isPeek =
+            hash.indexOf("#/overlay") === 0 ||
+            hash.indexOf("#/image-preview") === 0 ||
+            /\/#\/overlay(?:\b|\/|\?|$)/.test(href) ||
+            /\/#\/image-preview(?:\b|\/|\?|$)/.test(href);
+          var root = document.documentElement;
+          if (isPeek) {
+            root.classList.add("peek-window", "peek-boot");
+            root.style.background = "transparent";
+          }
+
+          var raw =
+            localStorage.getItem("acode-color-scheme") ||
+            localStorage.getItem("acode.colorScheme") ||
+            "";
+          var dark =
+            raw === "dark" ||
+            raw === "system" ||
+            raw === "auto" ||
+            raw === "default" ||
+            raw === "nocturne" ||
+            raw === "blue-black" ||
+            raw === "midnight" ||
+            raw === "forest" ||
+            raw === "rose" ||
+            raw === "ocean" ||
+            raw === "graphite" ||
+            raw === "ember" ||
+            raw === "teal" ||
+            raw === "ghost-pastel";
+          root.dataset.theme = dark ? "dark" : "light";
+          root.classList.remove("dark");
+          root.style.colorScheme = "only light";
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #f8f8f8;
+        color-scheme: only light;
+      }
+
+      html[data-theme="dark"],
+      html[data-theme="dark"] body {
+        background: #141414;
+        color-scheme: only light;
+      }
+
+      /* Alt+Alt / peek: transparent shell, no workbench boot animation. */
+      html.peek-boot,
+      html.peek-boot body,
+      html.peek-window,
+      html.peek-window body {
+        background: transparent !important;
+      }
+
+      html.peek-boot #boot-splash {
+        display: none !important;
+      }
+
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        background:
+          radial-gradient(120% 80% at 50% -10%, #ffffff 0%, transparent 55%),
+          linear-gradient(180deg, #f8f8f8 0%, #f3f3f3 100%);
+        color: #242424;
+        font-family: "Inter Variable", "Noto Sans SC", "Segoe UI", sans-serif;
+        user-select: none;
+        opacity: 1;
+        will-change: opacity;
+      }
+
+      html[data-theme="dark"] #boot-splash {
+        background:
+          radial-gradient(120% 80% at 50% -10%, #1c1c1c 0%, transparent 55%),
+          linear-gradient(180deg, #141414 0%, #101010 100%);
+        color: #e8e8e8;
+      }
+
+      #boot-splash[hidden] {
+        display: none !important;
+      }
+
+      #boot-splash .boot-logo-wrap {
+        position: relative;
+        width: 224px;
+        height: 148px;
+        display: grid;
+        place-items: center;
+      }
+
+      /* Loading splash shows only the mascot's eyes (in the primary text colour),
+         scanning and blinking naturally without the outer body silhouette. */
+      #boot-splash .boot-logo {
+        position: relative;
+        z-index: 1;
+        display: block;
+        width: 224px;
+        height: 148px;
+        overflow: visible;
+        animation: boot-breathe 2.4s ease-in-out infinite;
+      }
+
+      #boot-splash .boot-logo .boot-eye {
+        fill: #242424;
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: boot-eye-blink 3.2s ease-in-out infinite;
+      }
+
+      #boot-splash .boot-logo .boot-eyes {
+        animation: boot-scan 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+      }
+
+      html[data-theme="dark"] #boot-splash .boot-logo .boot-eye {
+        fill: #e8e8e8;
+      }
+
+      #boot-splash .boot-status {
+        position: absolute;
+        left: 50%;
+        bottom: clamp(72px, 14vh, 136px);
+        transform: translateX(-50%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+      }
+
+      #boot-splash .boot-label {
+        margin: 0;
+        color: rgba(36, 36, 36, 0.62);
+        font-size: 14px;
+        font-weight: 500;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+      }
+
+      html[data-theme="dark"] #boot-splash .boot-label {
+        color: rgba(232, 232, 232, 0.62);
+      }
+
+      #boot-splash .boot-progress {
+        width: 120px;
+        height: 2px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(36, 36, 36, 0.1);
+      }
+
+      html[data-theme="dark"] #boot-splash .boot-progress {
+        background: rgba(232, 232, 232, 0.12);
+      }
+
+      #boot-splash .boot-progress > i {
+        display: block;
+        width: 36%;
+        height: 100%;
+        border-radius: inherit;
+        background: #242424;
+        animation: boot-progress 1.45s ease-in-out infinite;
+      }
+
+      html[data-theme="dark"] #boot-splash .boot-progress > i {
+        background: #e8e8e8;
+      }
+
+      @keyframes boot-breathe {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 0.92;
+        }
+        50% {
+          transform: scale(1.04);
+          opacity: 1;
+        }
+      }
+
+      @keyframes boot-progress {
+        0% {
+          transform: translateX(-120%);
+          opacity: 0.45;
+        }
+        45% {
+          opacity: 1;
+        }
+        100% {
+          transform: translateX(320%);
+          opacity: 0.45;
+        }
+      }
+
+      @keyframes boot-scan {
+        0%,
+        100% {
+          transform: translate(-18px, 0) rotate(-2deg);
+        }
+        50% {
+          transform: translate(18px, 0) rotate(2deg);
+        }
+      }
+
+      @keyframes boot-eye-blink {
+        0%,
+        42%,
+        48%,
+        100% {
+          transform: scaleY(0.92);
+        }
+        45% {
+          transform: scaleY(0.08) scaleX(1.08);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash .boot-logo,
+        #boot-splash .boot-logo .boot-eyes,
+        #boot-splash .boot-logo .boot-eye,
+        #boot-splash .boot-progress > i {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="boot-splash" aria-live="polite" aria-busy="true">
+      <div class="boot-logo-wrap" aria-hidden="true">
+        <svg class="boot-logo" viewBox="152 204 208 128" xmlns="http://www.w3.org/2000/svg">
+          <g class="boot-eyes">
+            <rect class="boot-eye" x="191" y="224" width="34" height="88" rx="17" />
+            <rect class="boot-eye" x="287" y="224" width="34" height="88" rx="17" />
+          </g>
+        </svg>
+      </div>
+      <div class="boot-status">
+        <p class="boot-label">请稍等，正在为您准备……</p>
+        <span class="boot-progress" aria-hidden="true"><i></i></span>
+      </div>
+    </div>
+    <script>
+      // Body may parse after head script; re-assert peek splash kill before paint.
+      (function () {
+        if (!document.documentElement.classList.contains("peek-boot")) return;
+        var splash = document.getElementById("boot-splash");
+        if (splash) {
+          splash.hidden = true;
+          splash.setAttribute("aria-busy", "false");
+        }
+        document.body.style.background = "transparent";
+      })();
+    </script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
