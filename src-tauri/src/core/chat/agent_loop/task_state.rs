@@ -323,6 +323,7 @@ mod tests {
             result: "result".into(),
             success,
             user_denied: false,
+            plan_gate: false,
         }
     }
     fn message(id: &str, content: &str) -> ChatMessage {

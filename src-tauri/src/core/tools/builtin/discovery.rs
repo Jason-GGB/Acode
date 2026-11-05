@@ -26,10 +26,18 @@ impl Tool for SearchToolsTool {
             .registry
             .as_ref()
             .ok_or_else(|| ToolError::new("registry unavailable"))?;
-        let schemas = if crate::core::tools::plan_mode::shared_plan_mode_store()
-            .is_active(ctx.root_session_id())
-        {
-            registry.filter_for_plan_mode().schemas()
+        let store = crate::core::tools::plan_mode::shared_plan_mode_store();
+        let schemas = if store.is_active(ctx.root_session_id()) {
+            registry
+                .names()
+                .into_iter()
+                .filter_map(|name| {
+                    let tool = registry.get(&name)?;
+                    store
+                        .planning_offer(tool.name(), tool.read_only())
+                        .then(|| tool.schema())
+                })
+                .collect()
         } else {
             registry.schemas()
         };

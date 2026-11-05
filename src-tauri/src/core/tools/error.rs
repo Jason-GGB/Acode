@@ -98,6 +98,7 @@ pub struct ToolError {
     terminal: bool,
     cancelled: bool,
     user_rejected: bool,
+    plan_gate: bool,
 }
 
 impl ToolError {
@@ -107,6 +108,18 @@ impl ToolError {
             terminal: false,
             cancelled: false,
             user_rejected: false,
+            plan_gate: false,
+        }
+    }
+
+    /// A plan-gate refusal. Callers recognize it with [`Self::is_plan_gate`].
+    pub fn plan_gate(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            terminal: false,
+            cancelled: false,
+            user_rejected: false,
+            plan_gate: true,
         }
     }
 
@@ -116,6 +129,7 @@ impl ToolError {
             terminal: true,
             cancelled: false,
             user_rejected: true,
+            plan_gate: false,
         }
     }
 
@@ -126,11 +140,16 @@ impl ToolError {
             terminal: true,
             cancelled: false,
             user_rejected: false,
+            plan_gate: false,
         }
     }
 
     pub fn is_user_denied(&self) -> bool {
         self.user_rejected
+    }
+
+    pub fn is_plan_gate(&self) -> bool {
+        self.plan_gate
     }
 
     pub fn cancelled() -> Self {
@@ -139,6 +158,7 @@ impl ToolError {
             terminal: false,
             cancelled: true,
             user_rejected: false,
+            plan_gate: false,
         }
     }
 
@@ -197,6 +217,14 @@ mod tests {
     }
 
     #[test]
+    fn plan_gate_refusal_is_marked_without_being_a_user_denial() {
+        let error = ToolError::plan_gate("plan mode is active: blocked");
+        assert!(error.is_plan_gate());
+        assert!(!error.is_user_denied());
+        assert_eq!(error.category(), ErrorCategory::Permission);
+        assert!(!ToolError::new("plan mode is active: blocked").is_plan_gate());
+    }
+
     fn classifies_529_upstream_throttled_as_transient() {
         let error = ToolError::new(
             "Image API returned 529 from https://www.micuapi.ai/v1/images/generations. Response: {\"error\":{\"message\":\"upstream throttled (no usable account), retry shortly\",\"type\":\"overloaded_error\"}}",

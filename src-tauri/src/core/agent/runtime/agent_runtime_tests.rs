@@ -254,6 +254,7 @@ fn event_bridge_records_tool_and_completion_events() {
         preview: None,
         result: "clean".to_string(),
         success: true,
+        plan_gate: false,
     });
     bridge.emit(BusEvent::ChatFinished {
         session_id: "session".to_string(),

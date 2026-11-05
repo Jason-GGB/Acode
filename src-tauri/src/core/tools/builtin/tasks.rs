@@ -429,11 +429,6 @@ impl Tool for CompletePlanStepTool {
     }
     fn execute(&self, ctx: &ToolContext, args: Value) -> Result<String, ToolError> {
         let session_id = ctx.root_session_id();
-        if crate::core::tools::plan_mode::shared_plan_mode_store().is_active(session_id) {
-            return Err(ToolError::new(
-                "complete_plan_step is blocked while plan mode is active; wait for approval",
-            ));
-        }
         let step = args["step"].as_str().unwrap_or("").trim();
         let evidence = args["evidence"].as_str().unwrap_or("").trim();
         if evidence.is_empty() {

@@ -226,6 +226,7 @@ impl CompletionGate {
                             result: outcome.result.clone(),
                             success: outcome.success,
                             user_denied: false,
+                            plan_gate: false,
                         });
                     }
                 } else if outcome.success && self.pending_shell_jobs.contains_key(id) {
@@ -1073,6 +1074,7 @@ mod tests {
             result: "new evidence".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         gate.record_tool_outcome(&tools, &outcome);
         assert_eq!(gate.verification_retries, 0);
@@ -1095,6 +1097,7 @@ mod tests {
                 result: "job-1".into(),
                 success: true,
                 user_denied: false,
+                plan_gate: false,
             },
         );
         let mut request = empty_request();
@@ -1118,6 +1121,7 @@ mod tests {
                 result: "status: done\nexit_code: Some(0)\nchecked".into(),
                 success: true,
                 user_denied: false,
+                plan_gate: false,
             },
         );
         assert!(gate.pending_shell_jobs.is_empty());
@@ -1165,6 +1169,7 @@ mod tests {
             result: "ok".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         let paths = HashSet::from(["src/lib.rs".into()]);
         assert!(!provides_verification_evidence(&outcome, &paths));
@@ -1193,6 +1198,7 @@ mod tests {
             result: "ok".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         gate.record_tool_outcomes(&tools, &[write("a.rs"), write("b.rs")]);
         gate.note_verified_paths(["a.rs".into()]);
@@ -1251,6 +1257,7 @@ mod tests {
             result: "ok".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         for _ in 0..MAX_NO_PROGRESS_REPEATS {
             gate.record_tool_outcome(&tools, &outcome);
@@ -1392,6 +1399,7 @@ mod tests {
                     result: "ok".into(),
                     success: true,
                     user_denied: false,
+                    plan_gate: false,
                 },
                 ToolOutcome {
                     call_id: "2".into(),
@@ -1400,6 +1408,7 @@ mod tests {
                     result: "noise".into(),
                     success: true,
                     user_denied: false,
+                    plan_gate: false,
                 },
             ],
         );
@@ -1479,6 +1488,7 @@ mod tests {
                 result: "ok".into(),
                 success: true,
                 user_denied: false,
+                plan_gate: false,
             },
         );
         let mut user_idx = None;
@@ -1595,6 +1605,7 @@ mod tests {
                 result: "written".into(),
                 success: true,
                 user_denied: false,
+                plan_gate: false,
             },
         );
         assert!(

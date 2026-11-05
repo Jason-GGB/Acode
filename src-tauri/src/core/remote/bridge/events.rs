@@ -412,10 +412,9 @@ pub fn on_bus_event(event: &BusEvent) {
             preview,
             result,
             success,
+            plan_gate,
         } => {
-            // A plan-gate rejection ends the turn; do not leave Companion on
-            // Streaming ("回答中") until ChatFinished arrives.
-            if !*success && result.contains(crate::core::tools::plan_mode::PLAN_GATE_BLOCKED) {
+            if !*success && *plan_gate {
                 set_run_state(session_id, RemoteRunState::WaitingApproval);
             } else {
                 set_run_state(session_id, RemoteRunState::Streaming);
@@ -444,5 +443,51 @@ pub fn on_bus_event(event: &BusEvent) {
             });
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::run_state_for;
+    use super::super::RemoteRunState;
+    use super::on_bus_event;
+    use crate::core::event::BusEvent;
+
+    fn finished(session_id: &str, result: &str, plan_gate: bool) -> BusEvent {
+        BusEvent::ToolFinished {
+            session_id: session_id.to_string(),
+            subagent_id: None,
+            parent_activity_id: None,
+            message_id: "m".into(),
+            activity_id: "a".into(),
+            tool_name: "run_shell".into(),
+            title: "shell".into(),
+            kind: "shell".into(),
+            detail: None,
+            arguments: serde_json::json!({}),
+            preview: None,
+            result: result.to_string(),
+            success: false,
+            plan_gate,
+        }
+    }
+
+    #[test]
+    fn a_marked_writer_refusal_waits_for_approval() {
+        let session = "plan-gate-writer-mark";
+        let writer = "plan mode is active: writer tools and shell are not allowed. Present the complete plan using exit_plan_mode for user review; continue only after approval.";
+        on_bus_event(&finished(session, writer, true));
+        assert_eq!(run_state_for(session), RemoteRunState::WaitingApproval);
+    }
+
+    #[test]
+    fn refusal_prose_without_the_mark_stays_streaming() {
+        let session = "plan-gate-prose-only";
+        on_bus_event(&finished(
+            session,
+            crate::core::tools::plan_mode::PLAN_GATE_BLOCKED,
+            false,
+        ));
+        assert_eq!(run_state_for(session), RemoteRunState::Streaming);
     }
 }

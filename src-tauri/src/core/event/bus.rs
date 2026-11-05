@@ -180,6 +180,7 @@ pub enum BusEvent {
         preview: Option<crate::core::tools::preview::ToolPreview>,
         result: String,
         success: bool,
+        plan_gate: bool,
     },
     TaskListUpdated {
         session_id: String,

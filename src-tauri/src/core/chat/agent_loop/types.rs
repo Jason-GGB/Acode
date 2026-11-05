@@ -24,6 +24,8 @@ pub struct ToolOutcome {
     pub result: String,
     pub success: bool,
     pub user_denied: bool,
+    /// Plan-gate refusal. The result text is for the model.
+    pub plan_gate: bool,
 }
 
 pub fn now_millis() -> u64 {

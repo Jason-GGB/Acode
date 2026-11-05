@@ -105,6 +105,7 @@ impl VerificationQueue {
                 result,
                 success,
                 user_denied: false,
+                plan_gate: false,
             })
         }).collect();
         let verified_paths = paths
@@ -335,6 +336,7 @@ mod tests {
             result: "ok".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         queue.record(&[edit()], &root);
         queue.record(
@@ -345,6 +347,7 @@ mod tests {
                 result: "exit_code: 0\npassed".into(),
                 success: true,
                 user_denied: false,
+                plan_gate: false,
             }],
             &root,
         );
@@ -409,6 +412,7 @@ mod tests {
             result: "ok".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         queue.record(&[outcome], &std::env::temp_dir());
         assert_eq!(queue.paths, BTreeSet::from(["a.rs".into(), "b.rs".into()]));
@@ -427,6 +431,7 @@ mod tests {
             result: "exit_code: 0\nFinished `dev` profile [unoptimized + debuginfo]".into(),
             success: true,
             user_denied: false,
+            plan_gate: false,
         };
         let content = verify_feedback_content(&outcome);
         assert!(content.starts_with("[System] Automatic post-edit verification (`cargo check -q`)"));

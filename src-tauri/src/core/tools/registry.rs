@@ -268,32 +268,6 @@ impl ToolRegistry {
         }
         filtered
     }
-
-    /// Tools exposed while plan mode is active: read-only tools plus the
-    /// planning / interaction tools plan mode explicitly allows.
-    pub fn filter_for_plan_mode(&self) -> ToolRegistry {
-        let mut filtered = ToolRegistry::new();
-        for name in self.names() {
-            if let Some(tool) = self.get(&name) {
-                if tool.read_only()
-                    || matches!(
-                        name.as_str(),
-                        "save_plan"
-                            | "update_tasks"
-                            | "ask_user"
-                            | "complete_plan_step"
-                            | "todo_write"
-                            | "share_to_companion"
-                            | "share_preview_url"
-                            | "manage_plugin"
-                    )
-                {
-                    filtered.register(tool);
-                }
-            }
-        }
-        filtered
-    }
 }
 
 impl Default for ToolRegistry {
@@ -443,10 +417,6 @@ mod tests {
         let agent = registry.names();
         assert!(agent.contains(&"request_plan_mode".to_string()));
         assert!(!registry
-            .filter_for_plan_mode()
-            .names()
-            .contains(&"request_plan_mode".to_string()));
-        assert!(!registry
             .filter_for_ask_mode()
             .names()
             .contains(&"request_plan_mode".to_string()));
@@ -474,28 +444,6 @@ mod tests {
 
         let names = registry.filter_for_image_mode().names();
         assert_eq!(names, vec!["generate_image"]);
-    }
-
-    #[test]
-    fn filter_for_plan_mode_keeps_manage_plugin() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(StubTool {
-            name: "manage_plugin",
-            read_only: false,
-        }));
-        registry.register(Arc::new(StubTool {
-            name: "write_file",
-            read_only: false,
-        }));
-        registry.register(Arc::new(StubTool {
-            name: "read_file",
-            read_only: true,
-        }));
-
-        let names = registry.filter_for_plan_mode().names();
-        assert!(names.contains(&"manage_plugin".to_string()));
-        assert!(names.contains(&"read_file".to_string()));
-        assert!(!names.contains(&"write_file".to_string()));
     }
 
     struct HiddenTool;

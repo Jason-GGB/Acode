@@ -3,9 +3,13 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::core::tools::error::ToolError;
 
-/// Hard plan-mode gate: when active, reject non-readonly mutating tools.
+/// Plan-gate refusal for tools other than writers and shell.
 pub const PLAN_GATE_BLOCKED: &str =
     "plan mode is active: writer tools (and Shell) are not allowed until the user approves the plan or switches back to Agent. Call save_plan + update_tasks and stop, or wait for Approve & execute — do not retry writers.";
+
+/// Plan-gate refusal for writers and shell. Names `exit_plan_mode`.
+pub const PLAN_GATE_WRITER_BLOCKED: &str =
+    "plan mode is active: writer tools and shell are not allowed. Present the complete plan using exit_plan_mode for user review; continue only after approval.";
 
 /// User-visible stop text when a writer hits the gate. Also used to detect
 /// that the turn ended because of the gate (even if no checklist exists).
@@ -151,6 +155,27 @@ impl PlanModeStore {
                 .is_some_and(|g| g.contains(session_id))
     }
 
+    /// Whether search may mention this tool while the plan gate is on.
+    pub fn planning_offer(&self, tool_name: &str, read_only: bool) -> bool {
+        if read_only {
+            return true;
+        }
+        matches!(
+            tool_name,
+            "save_plan"
+                | "update_tasks"
+                | "ask_user"
+                | "ask_user_question"
+                | "exit_plan_mode"
+                | "subagent"
+                | "share_to_companion"
+                | "share_preview_url"
+                | "todo_write"
+                | "manage_plugin"
+        )
+    }
+
+    /// Whether this tool may execute while the plan gate is on.
     pub fn authorize(
         &self,
         session_id: &str,
@@ -160,17 +185,19 @@ impl PlanModeStore {
         if !self.is_active(session_id) {
             return Ok(());
         }
-        if plan_mode_allowed(tool_name, read_only) {
+        if self.planning_offer(tool_name, read_only) || tool_name == "request_plan_mode" {
             return Ok(());
         }
         self.mark_awaiting_approval(session_id);
-        Err(ToolError::new(
-            if matches!(tool_name, "write" | "edit" | "pwsh" | "bash" | "job_kill") {
-                "plan mode is active: writer tools and shell are not allowed. Present the complete plan using exit_plan_mode for user review; continue only after approval."
-            } else {
-                PLAN_GATE_BLOCKED
-            },
-        ))
+        let message = if matches!(
+            tool_name,
+            "write" | "edit" | "run_shell" | "pwsh" | "bash" | "job_kill"
+        ) {
+            PLAN_GATE_WRITER_BLOCKED
+        } else {
+            PLAN_GATE_BLOCKED
+        };
+        Err(ToolError::plan_gate(message))
     }
 }
 
@@ -185,26 +212,6 @@ pub fn task_status_is_open(status: &str) -> bool {
     )
 }
 
-fn plan_mode_allowed(tool_name: &str, read_only: bool) -> bool {
-    if read_only {
-        return true;
-    }
-    matches!(
-        tool_name,
-        "save_plan"
-            | "update_tasks"
-            | "ask_user"
-            | "ask_user_question"
-            | "exit_plan_mode"
-            | "subagent"
-            | "share_to_companion"
-            | "share_preview_url"
-            | "todo_write"
-            | "manage_plugin"
-            | "request_plan_mode"
-    )
-}
-
 pub fn shared_plan_mode_store() -> &'static PlanModeStore {
     static STORE: OnceLock<PlanModeStore> = OnceLock::new();
     STORE.get_or_init(PlanModeStore::new)
@@ -213,6 +220,59 @@ pub fn shared_plan_mode_store() -> &'static PlanModeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planning_offer_names_plan_tools_and_hides_execution_tools() {
+        let store = PlanModeStore::new();
+        assert!(store.planning_offer("exit_plan_mode", false));
+        assert!(store.planning_offer("ask_user_question", false));
+        assert!(store.planning_offer("subagent", false));
+        assert!(store.planning_offer("save_plan", false));
+        assert!(store.planning_offer("read_file", true));
+        assert!(!store.planning_offer("request_plan_mode", false));
+        assert!(!store.planning_offer("complete_plan_step", false));
+        assert!(!store.planning_offer("write", false));
+        assert!(!store.planning_offer("run_shell", false));
+    }
+
+    #[test]
+    fn writer_and_shell_refusals_name_exit_plan_mode() {
+        let store = PlanModeStore::new();
+        store.set_active("s", true);
+        for name in ["write", "edit", "run_shell", "pwsh", "bash", "job_kill"] {
+            let error = store.authorize("s", name, false).unwrap_err();
+            assert!(error.is_plan_gate(), "{name}");
+            let message = error.to_string();
+            assert!(message.contains("exit_plan_mode"), "{name}: {message}");
+            assert!(message.contains("plan mode is active"), "{name}: {message}");
+            assert_ne!(message, PLAN_GATE_BLOCKED, "{name}");
+        }
+    }
+
+    #[test]
+    fn other_blocked_tools_keep_the_save_plan_refusal() {
+        let store = PlanModeStore::new();
+        store.set_active("s", true);
+        for name in ["complete_plan_step", "write_file"] {
+            let error = store.authorize("s", name, false).unwrap_err();
+            assert!(error.is_plan_gate(), "{name}");
+            assert_eq!(error.to_string(), PLAN_GATE_BLOCKED, "{name}");
+        }
+    }
+
+    #[test]
+    fn request_plan_mode_runs_while_the_gate_is_on() {
+        let store = PlanModeStore::new();
+        store.set_active("s", true);
+        assert!(store.authorize("s", "request_plan_mode", false).is_ok());
+        assert!(!store.is_awaiting_approval("s"));
+    }
+
+    #[test]
+    fn a_closed_gate_does_not_refuse_writers() {
+        let store = PlanModeStore::new();
+        assert!(store.authorize("s", "run_shell", false).is_ok());
+    }
 
     #[test]
     fn plan_mode_alone_does_not_await_approval() {

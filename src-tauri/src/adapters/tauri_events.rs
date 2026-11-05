@@ -381,6 +381,7 @@ impl EventBus for TauriEventBus {
                 preview,
                 result,
                 success,
+                plan_gate: _,
             } => {
                 let _ = self.app.emit(
                     "tool-finished",

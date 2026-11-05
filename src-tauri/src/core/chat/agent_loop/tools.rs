@@ -256,6 +256,10 @@ impl ToolExecutor {
             .as_ref()
             .err()
             .is_some_and(ToolError::is_user_denied);
+        let plan_gate = execution
+            .as_ref()
+            .err()
+            .is_some_and(ToolError::is_plan_gate);
         let (raw_result, success) = match execution {
             Ok(value) => {
                 let success = !matches!(started.tool_name.as_str(), "pwsh" | "bash" | "job_output")
@@ -339,6 +343,7 @@ impl ToolExecutor {
                 preview: started.tool_preview,
                 result: activity_result,
                 success,
+                plan_gate,
             });
         if !self.tools.is_dsh() {
             crate::core::plugins::after_tool(&started.tool_name, success, &result);
@@ -350,6 +355,7 @@ impl ToolExecutor {
             result,
             success,
             user_denied,
+            plan_gate,
         }
     }
 }

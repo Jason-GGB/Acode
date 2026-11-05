@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
+use super::types::ToolOutcome;
 use crate::core::chat::limits::{
     CONSECUTIVE_TOOL_FAILURE_CHALLENGE, MAX_CONSECUTIVE_TOOL_FAILURES,
 };
-use crate::core::tools::plan_mode::PLAN_GATE_BLOCKED;
-
-use super::types::ToolOutcome;
 
 /// Injected once when the same tool+args fails with the same error again,
 /// giving the model a chance to change strategy before a hard stop.
@@ -99,7 +97,7 @@ impl FailureBreaker {
                 any_success = true;
                 continue;
             }
-            if is_plan_gate_error(&outcome.result) {
+            if outcome.plan_gate {
                 if self.plan_gate_challenged {
                     return FailureAction::Stop {
                         reason: PLAN_GATE_STOP_REASON.to_string(),
@@ -235,10 +233,6 @@ fn truncate_error(value: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
-pub fn is_plan_gate_error(result: &str) -> bool {
-    result.contains(PLAN_GATE_BLOCKED)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +269,14 @@ mod tests {
             result: result.into(),
             success,
             user_denied: false,
+            plan_gate: false,
         }
+    }
+
+    fn plan_gate(tool: &str, args: &str, result: &str) -> ToolOutcome {
+        let mut outcome = outcome(tool, args, result, false);
+        outcome.plan_gate = true;
+        outcome
     }
 
     #[test]
@@ -450,11 +451,10 @@ mod tests {
     #[test]
     fn plan_gate_challenges_on_first_blocked_writer() {
         let mut breaker = FailureBreaker::new();
-        match breaker.check(&[outcome(
+        match breaker.check(&[plan_gate(
             "run_shell",
             r#"{"command":"ls"}"#,
-            PLAN_GATE_BLOCKED,
-            false,
+            "plan mode is active: writer tools and shell are not allowed. Present the complete plan using exit_plan_mode for user review; continue only after approval.",
         )]) {
             FailureAction::Challenge {
                 status_kind,
@@ -471,17 +471,15 @@ mod tests {
     #[test]
     fn plan_gate_stops_if_the_model_retries_a_writer() {
         let mut breaker = FailureBreaker::new();
-        let _ = breaker.check(&[outcome(
+        let _ = breaker.check(&[plan_gate(
             "run_shell",
             r#"{"command":"a"}"#,
             PLAN_GATE_BLOCKED,
-            false,
         )]);
-        match breaker.check(&[outcome(
+        match breaker.check(&[plan_gate(
             "run_shell",
             r#"{"command":"b"}"#,
             PLAN_GATE_BLOCKED,
-            false,
         )]) {
             FailureAction::Stop { reason } => {
                 assert!(reason.contains("批准"), "{reason}");
