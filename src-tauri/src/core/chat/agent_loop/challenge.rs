@@ -5,12 +5,9 @@
 //! so the model either actually executes the work or explicitly admits
 //! nothing was changed — claiming done is not accepted at face value.
 //!
-//! [`CompletionGate`] owns the small bit of per-turn state (whether a
-//! mutation/verification happened, and how many times each challenge has
-//! already been issued) and exposes a single `evaluate_final_answer` entry
-//! point that the loop calls whenever the model returns with no tool calls.
-//! Adding another challenge policy later (e.g. a minimal-coding-specific
-//! check) is meant to be an additive change here, not a change to the loop.
+//! [`CompletionGate`] tracks whether this turn produced verified work and how
+//! many times each completion challenge has already been issued.
+//! [`super::turn_end::TurnEnd`] is what the loop asks when the model calls no tools.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,8 +147,53 @@ pub struct CompletionGate {
     /// Distinct successful results replenish continuation budgets. Repeating
     /// identical reads does not buy an endless series of completion retries.
     progress_seen: HashSet<u64>,
-    pending_shell_jobs: HashMap<String, String>,
+    pending_shell_jobs: HashMap<String, PendingJob>,
+    open_todo_count: u32,
     background_retries: u32,
+}
+
+struct PendingJob {
+    arguments: String,
+    dsh: bool,
+}
+
+fn pending_shell_job(
+    outcome: &ToolOutcome,
+    args: &serde_json::Value,
+) -> Option<(String, PendingJob)> {
+    let kind = super::turn_end::shell_kind(&outcome.tool_name)?;
+    let command = args
+        .get("command")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if crate::core::tools::shell_jobs::background_allowed(command) {
+        return None;
+    }
+    let requested = args
+        .get("run_in_background")
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    let promoted = kind == super::turn_end::ShellKind::Dsh
+        && super::turn_end::dsh_background_result(&outcome.result);
+    if !requested && !promoted {
+        return None;
+    }
+    let id = if kind == super::turn_end::ShellKind::Dsh {
+        super::turn_end::dsh_job_id(&outcome.result)
+            .unwrap_or_else(|| outcome.result.trim().to_string())
+    } else {
+        outcome.result.trim().to_string()
+    };
+    if id.is_empty() {
+        return None;
+    }
+    Some((
+        id,
+        PendingJob {
+            arguments: outcome.arguments.clone(),
+            dsh: kind == super::turn_end::ShellKind::Dsh,
+        },
+    ))
 }
 
 impl CompletionGate {
@@ -197,43 +239,34 @@ impl CompletionGate {
         for outcome in outcomes {
             let args: serde_json::Value =
                 serde_json::from_str(&outcome.arguments).unwrap_or_default();
-            if outcome.tool_name == "run_shell"
-                && outcome.success
-                && args["run_in_background"].as_bool() == Some(true)
-                && !crate::core::tools::shell_jobs::background_allowed(
-                    args["command"].as_str().unwrap_or(""),
-                )
-            {
-                self.pending_shell_jobs
-                    .insert(outcome.result.trim().to_string(), outcome.arguments.clone());
-            }
-            if matches!(
-                outcome.tool_name.as_str(),
-                "wait_for_shell" | "read_shell_output" | "stop_shell"
-            ) {
-                let id = args["job_id"].as_str().unwrap_or("");
-                if outcome.result.starts_with("status: done")
-                    || (outcome.tool_name == "stop_shell" && outcome.success)
-                {
-                    if let Some(arguments) = self.pending_shell_jobs.remove(id) {
-                        let mut args: serde_json::Value =
-                            serde_json::from_str(&arguments).unwrap_or_default();
-                        args["run_in_background"] = false.into();
-                        finished_jobs.push(ToolOutcome {
-                            call_id: outcome.call_id.clone(),
-                            tool_name: "run_shell".into(),
-                            arguments: args.to_string(),
-                            result: outcome.result.clone(),
-                            success: outcome.success,
-                            user_denied: false,
-                            plan_gate: false,
-                        });
-                    }
-                } else if outcome.success && self.pending_shell_jobs.contains_key(id) {
-                    // The model really polled the job; continue waiting instead
-                    // of spending the no-action completion budget.
-                    self.background_retries = 0;
+            if outcome.success {
+                if let Some((id, job)) = pending_shell_job(outcome, &args) {
+                    self.pending_shell_jobs.insert(id, job);
                 }
+            }
+            let id = args["job_id"].as_str().unwrap_or("");
+            match super::turn_end::job_watch(&outcome.tool_name) {
+                Some(super::turn_end::JobWatch::HostPoll) => {
+                    if outcome.result.starts_with("status: done") {
+                        self.take_finished_shell(id, outcome, &mut finished_jobs);
+                    } else if outcome.success && self.pending_shell_jobs.contains_key(id) {
+                        self.background_retries = 0;
+                    }
+                }
+                Some(super::turn_end::JobWatch::HostStop) if outcome.success => {
+                    self.take_finished_shell(id, outcome, &mut finished_jobs);
+                }
+                Some(super::turn_end::JobWatch::DshPoll) => {
+                    if super::turn_end::dsh_job_finished(&outcome.result) {
+                        self.take_finished_shell(id, outcome, &mut finished_jobs);
+                    } else if outcome.success && self.pending_shell_jobs.contains_key(id) {
+                        self.background_retries = 0;
+                    }
+                }
+                Some(super::turn_end::JobWatch::DshStop) if outcome.success => {
+                    self.take_finished_shell(id, outcome, &mut finished_jobs);
+                }
+                _ => {}
             }
         }
         for outcome in outcomes
@@ -266,7 +299,7 @@ impl CompletionGate {
                 continue;
             }
             for path in &self.mutated_paths {
-                let scope_matches = outcome.tool_name != "run_shell"
+                let scope_matches = !super::turn_end::counts_as_shell(&outcome.tool_name)
                     || self.workspace_root.as_ref().is_none_or(|root| {
                         extract_shell_command(&outcome.arguments).is_some_and(|command| {
                             super::post_edit_verify::check_targets_path(root, &command, path)
@@ -283,6 +316,32 @@ impl CompletionGate {
         if !finished_jobs.is_empty() {
             self.record_tool_outcomes(tools, &finished_jobs);
         }
+    }
+
+    fn take_finished_shell(
+        &mut self,
+        id: &str,
+        outcome: &ToolOutcome,
+        finished: &mut Vec<ToolOutcome>,
+    ) {
+        let Some(job) = self.pending_shell_jobs.remove(id) else {
+            return;
+        };
+        let mut args: serde_json::Value = serde_json::from_str(&job.arguments).unwrap_or_default();
+        args["run_in_background"] = false.into();
+        finished.push(ToolOutcome {
+            call_id: outcome.call_id.clone(),
+            tool_name: if job.dsh {
+                "bash".into()
+            } else {
+                "run_shell".into()
+            },
+            arguments: args.to_string(),
+            result: outcome.result.clone(),
+            success: outcome.success,
+            user_denied: false,
+            plan_gate: false,
+        });
     }
 
     pub fn note_verified_paths(&mut self, paths: impl IntoIterator<Item = String>) {
@@ -331,7 +390,10 @@ impl CompletionGate {
     }
 
     fn record_side_effects(&mut self, _tools: &ToolManager, outcome: &ToolOutcome) {
-        if outcome.tool_name == "update_tasks" && outcome.success {
+        if outcome.success
+            && super::turn_end::task_list_kind(&outcome.tool_name)
+                == Some(super::turn_end::TaskListKind::Plan)
+        {
             // Explicit acceptance criteria supersede path-name guesses (a path
             // mentioned by the user may be a reference or a file to preserve).
             if serde_json::from_str::<serde_json::Value>(&outcome.arguments)
@@ -349,6 +411,14 @@ impl CompletionGate {
             }
             if let Some(count) = count_open_tasks_from_args(&outcome.arguments) {
                 self.open_task_count = count;
+            }
+        }
+        if outcome.success
+            && super::turn_end::task_list_kind(&outcome.tool_name)
+                == Some(super::turn_end::TaskListKind::Todo)
+        {
+            if let Some(count) = super::turn_end::open_todo_count(&outcome.arguments) {
+                self.open_todo_count = count;
             }
         }
         if outcome.tool_name == "complete_plan_step" && outcome.success {
@@ -370,10 +440,9 @@ impl CompletionGate {
         if !outcome.success {
             return;
         }
-        if !matches!(
-            outcome.tool_name.as_str(),
-            "update_tasks" | "save_plan" | "wait_for_shell" | "read_shell_output"
-        ) {
+        if !(matches!(outcome.tool_name.as_str(), "update_tasks" | "save_plan")
+            || super::turn_end::is_shell_poll(&outcome.tool_name))
+        {
             use std::hash::{Hash, Hasher};
             let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
             (&outcome.tool_name, &outcome.arguments, &outcome.result).hash(&mut fingerprint);
@@ -405,10 +474,7 @@ impl CompletionGate {
         }
         repeated.1 += 1;
         if repeated.1 >= MAX_NO_PROGRESS_REPEATS
-            && !matches!(
-                outcome.tool_name.as_str(),
-                "wait_for_shell" | "read_shell_output"
-            )
+            && !super::turn_end::is_shell_poll(&outcome.tool_name)
         {
             self.stalled = true;
         }
@@ -423,7 +489,7 @@ impl CompletionGate {
         if is_write_tool(&outcome.tool_name) || is_mutation_tool(&outcome.tool_name) {
             self.wrote_files = true;
         }
-        if looks_like_local_dev_server(&outcome.tool_name, &outcome.arguments) {
+        if looks_like_local_dev_server(&outcome.tool_name, &outcome.arguments, &outcome.result) {
             self.started_local_server = true;
         }
     }
@@ -448,8 +514,9 @@ impl CompletionGate {
         !self.disabled
             && self.success_repeats.iter().any(|(key, (_, count))| {
                 *count >= 8
-                    && !key.starts_with("wait_for_shell|")
-                    && !key.starts_with("read_shell_output|")
+                    && !super::turn_end::is_shell_poll(
+                        key.split_once('|').map(|(name, _)| name).unwrap_or(key),
+                    )
             })
     }
 
@@ -480,8 +547,15 @@ impl CompletionGate {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join(", ");
-                push_completion_feedback(request, user_msg_index, content, reasoning,
-                    &format!("[System] Finite shell jobs are still pending: {jobs}. Call wait_for_shell/read_shell_output until they exit. Do not restart them or claim completion from a job ID."));
+                let host = self.pending_shell_jobs.values().any(|job| !job.dsh);
+                let dsh = self.pending_shell_jobs.values().any(|job| job.dsh);
+                push_completion_feedback(
+                    request,
+                    user_msg_index,
+                    content,
+                    reasoning,
+                    &super::turn_end::pending_shell_message(&jobs, host, dsh),
+                );
                 return ChallengeOutcome::ContinueWithChallenge {
                     status_kind: "wait_background_jobs".into(),
                 };
@@ -587,14 +661,19 @@ impl CompletionGate {
             };
         }
 
-        if self.open_task_count > 0 && self.open_tasks_retries < MAX_COMPLETION_RETRIES {
+        if (self.open_task_count > 0 || self.open_todo_count > 0)
+            && self.open_tasks_retries < MAX_COMPLETION_RETRIES
+        {
             self.open_tasks_retries += 1;
             push_completion_feedback(
                 request,
                 user_msg_index,
                 content,
                 reasoning,
-                OPEN_TASKS_CHALLENGE,
+                &super::turn_end::open_work_message(
+                    self.open_task_count > 0,
+                    self.open_todo_count > 0,
+                ),
             );
             return ChallengeOutcome::ContinueWithChallenge {
                 status_kind: "open_tasks".to_string(),
@@ -632,7 +711,7 @@ impl CompletionGate {
             request,
             self.mutation_succeeded,
             self.verification_succeeded,
-            self.open_task_count > 0,
+            self.open_task_count > 0 || self.open_todo_count > 0,
         );
         ChallengeOutcome::Finish {
             content: final_content,
@@ -672,17 +751,19 @@ fn is_share_tool(name: &str) -> bool {
     matches!(name, "share_to_companion" | "share_preview_url")
 }
 
-fn looks_like_local_dev_server(tool_name: &str, arguments: &str) -> bool {
-    if tool_name != "run_shell" {
+fn looks_like_local_dev_server(tool_name: &str, arguments: &str, result: &str) -> bool {
+    if super::turn_end::shell_kind(tool_name).is_none() {
         return false;
     }
     let value: serde_json::Value =
         serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
-    let background = value
+    let requested = value
         .get("run_in_background")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if !background {
+    let promoted = super::turn_end::shell_kind(tool_name) == Some(super::turn_end::ShellKind::Dsh)
+        && super::turn_end::dsh_background_result(result);
+    if !requested && !promoted {
         return false;
     }
     let command = value
@@ -877,7 +958,7 @@ fn provides_verification_evidence(outcome: &ToolOutcome, mutated_paths: &HashSet
             paths_match(mutated, &path) && !super::post_edit_verify::needs_executable_check(mutated)
         });
     }
-    if outcome.tool_name != "run_shell" || !outcome.success {
+    if !super::turn_end::counts_as_shell(&outcome.tool_name) || !outcome.success {
         return false;
     }
     let Some(command) = extract_shell_command(&outcome.arguments) else {
@@ -1127,7 +1208,8 @@ mod tests {
         assert!(gate.pending_shell_jobs.is_empty());
         assert!(!looks_like_local_dev_server(
             "run_shell",
-            r#"{"command":"pnpm build","run_in_background":true}"#
+            r#"{"command":"pnpm build","run_in_background":true}"#,
+            "",
         ));
     }
 
@@ -1269,11 +1351,13 @@ mod tests {
     fn detects_background_vite_as_local_server() {
         assert!(looks_like_local_dev_server(
             "run_shell",
-            r#"{"command":"npx vite --host","run_in_background":true}"#
+            r#"{"command":"npx vite --host","run_in_background":true}"#,
+            "",
         ));
         assert!(!looks_like_local_dev_server(
             "run_shell",
-            r#"{"command":"npx vite --host","run_in_background":false}"#
+            r#"{"command":"npx vite --host","run_in_background":false}"#,
+            "",
         ));
         assert!(is_write_tool("write_file"));
         assert!(is_share_tool("share_preview_url"));

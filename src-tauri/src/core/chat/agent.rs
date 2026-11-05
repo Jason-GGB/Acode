@@ -16,13 +16,13 @@ use crate::runtime::ToolManager;
 use tracing::Instrument;
 
 use super::agent_loop::challenge::push_challenge_message;
-use super::agent_loop::challenge::{ChallengeOutcome, CompletionGate};
 use super::agent_loop::failure::{FailureAction, FailureBreaker};
 use super::agent_loop::mid_turn_compact;
 use super::agent_loop::post_edit_verify::{verify_feedback_content, VerificationQueue};
 use super::agent_loop::soft_inject::drain_soft_injects;
 use super::agent_loop::stream_turn::{self, StreamTurnResult};
 use super::agent_loop::tools::ToolExecutor;
+use super::agent_loop::turn_end::{Answer, Decision, TurnEnd};
 use super::agent_loop::types::{estimate_request_tokens, non_empty, now_millis};
 
 pub struct AgentRunner {
@@ -180,22 +180,24 @@ impl AgentRunner {
         let mut steps = 0u32;
         let mut context_recoveries = 0u32;
         let mut failure_breaker = FailureBreaker::new();
-        let mut completion_gate = CompletionGate::new();
-        completion_gate.set_workspace_root(tool_ctx.workspace_root.clone());
+        let mut turn_end = TurnEnd::new();
+        turn_end
+            .gate_mut()
+            .set_workspace_root(tool_ctx.workspace_root.clone());
         let mut verification_queue = VerificationQueue::default();
         let mut task_state = super::agent_loop::task_state::TaskState::new(&request);
         let mut criteria_retries = 0u32;
         let mut progress_evidence = std::collections::HashSet::new();
         let mut discovered_tools = std::collections::HashSet::new();
         if crate::core::tools::image_mode::is_image_mode(&request.session_id) {
-            completion_gate.require_image();
+            turn_end.gate_mut().require_image();
         }
         if crate::core::chat::session_origin::shared_session_origin_store()
             .is_companion(tool_ctx.root_session_id())
         {
-            completion_gate.require_share_deliverable();
+            turn_end.gate_mut().require_share_deliverable();
         }
-        completion_gate.capture_goal_from_request(&request);
+        turn_end.gate_mut().capture_goal_from_request(&request);
         let mut user_msg_index = request
             .messages
             .iter()
@@ -237,7 +239,7 @@ impl AgentRunner {
             }
             drain_soft_injects(&soft_queue, &mut request, &tx, &mut user_msg_index).await;
             if task_state.observe_followups(&request) {
-                completion_gate.capture_goal_from_request(&request);
+                turn_end.gate_mut().capture_goal_from_request(&request);
             }
 
             if self.max_steps > 0 && steps >= self.max_steps {
@@ -397,129 +399,127 @@ impl AgentRunner {
             used_tokens += estimate_tokens(&content) + estimate_tokens(&reasoning);
 
             if tool_calls.is_empty() {
-                if self.tools.is_dsh() {
-                    let _ = tx
-                        .send(StreamEvent::TurnComplete {
-                            content,
-                            reasoning: non_empty(reasoning),
-                            tool_calls: vec![],
-                            finish_reason,
-                        })
-                        .await;
-                    break;
-                }
-                if task_state.execution_paused() {
-                    let _ = tx
-                        .send(StreamEvent::TurnComplete {
-                            content,
-                            reasoning: non_empty(reasoning),
-                            tool_calls: vec![],
-                            finish_reason: Some("user_paused".into()),
-                        })
-                        .await;
-                    break;
-                }
-                let mut pending = std::mem::take(&mut verification_queue);
-                let verify_ctx = tool_ctx.clone();
-                let report =
-                    tauri::async_runtime::spawn_blocking(move || pending.run_pending(&verify_ctx))
-                        .await
-                        .map_err(|e| {
-                            ProviderError::message(format!("verification task failed: {e}"))
-                        })?;
-                if cancelled.load(Ordering::Relaxed) {
-                    return Err(ProviderError::cancelled());
-                }
-                completion_gate.note_verified_paths(report.verified_paths);
-                if !report.outcomes.is_empty() {
-                    for outcome in report.outcomes {
-                        task_state.record(&outcome);
-                        used_tokens += estimate_tokens(&outcome.result);
-                        tool_ctx.conversation.journal().record_tool_outcome(
-                            tool_ctx.root_session_id(),
-                            &request.request_id,
-                            &tool_ctx.assistant_message_id,
-                            &outcome.tool_name,
-                            &outcome.arguments,
-                            outcome.success,
-                            &outcome.result,
-                        );
-                        push_challenge_message(
-                            &mut request,
-                            &mut user_msg_index,
-                            &verify_feedback_content(&outcome),
-                        );
-                    }
-                    // The model must see actual check results before writing its final answer.
-                    steps += 1;
-                    continue;
-                }
                 let unresolved = task_state.unresolved_criteria();
-                if !unresolved.is_empty() {
-                    if criteria_retries < 3 {
-                        criteria_retries += 1;
-                        push_challenge_message(&mut request, &mut user_msg_index,
-                            &format!("[System] Acceptance criteria still lack successful evidence: {}. Complete and verify them, then update_tasks with evidence call IDs, or report the blocker.", unresolved.join("; ")));
-                        steps += 1;
-                        continue;
-                    }
-                    let _ = tx
-                        .send(StreamEvent::TurnComplete {
-                            content: format!(
-                                "任务尚未通过验收：{}。已保留任务状态和执行证据。",
-                                unresolved.join("；")
-                            ),
-                            reasoning: non_empty(reasoning),
-                            tool_calls: vec![],
-                            finish_reason: Some("unverified_completion".into()),
-                        })
-                        .await;
-                    break;
-                }
-                match completion_gate.evaluate_final_answer(
+                let mut decision = turn_end.decide(
                     &mut request,
                     &mut user_msg_index,
-                    content,
-                    reasoning,
-                    finish_reason,
-                ) {
-                    ChallengeOutcome::ContinueWithChallenge { status_kind } => {
-                        let _ = tx.send(StreamEvent::Status { kind: status_kind }).await;
+                    Answer {
+                        content: content.clone(),
+                        reasoning: reasoning.clone(),
+                        finish_reason: finish_reason.clone(),
+                        paused: task_state.execution_paused(),
+                        unresolved_criteria: unresolved.clone(),
+                        criteria_retries,
+                    },
+                );
+                if matches!(decision, Decision::Verify) {
+                    let mut pending = std::mem::take(&mut verification_queue);
+                    let verify_ctx = tool_ctx.clone();
+                    let report = tauri::async_runtime::spawn_blocking(move || {
+                        pending.run_pending(&verify_ctx)
+                    })
+                    .await
+                    .map_err(|e| {
+                        ProviderError::message(format!("verification task failed: {e}"))
+                    })?;
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Err(ProviderError::cancelled());
+                    }
+                    turn_end.note_verification_drained();
+                    turn_end
+                        .gate_mut()
+                        .note_verified_paths(report.verified_paths);
+                    if !report.outcomes.is_empty() {
+                        for outcome in report.outcomes {
+                            task_state.record(&outcome);
+                            used_tokens += estimate_tokens(&outcome.result);
+                            tool_ctx.conversation.journal().record_tool_outcome(
+                                tool_ctx.root_session_id(),
+                                &request.request_id,
+                                &tool_ctx.assistant_message_id,
+                                &outcome.tool_name,
+                                &outcome.arguments,
+                                outcome.success,
+                                &outcome.result,
+                            );
+                            push_challenge_message(
+                                &mut request,
+                                &mut user_msg_index,
+                                &verify_feedback_content(&outcome),
+                            );
+                        }
                         steps += 1;
                         continue;
                     }
-                    ChallengeOutcome::Finish {
+                    decision = turn_end.decide(
+                        &mut request,
+                        &mut user_msg_index,
+                        Answer {
+                            content,
+                            reasoning,
+                            finish_reason,
+                            paused: task_state.execution_paused(),
+                            unresolved_criteria: unresolved,
+                            criteria_retries,
+                        },
+                    );
+                }
+                match decision {
+                    Decision::Verify => continue,
+                    Decision::Continue { status_kind, .. } => {
+                        if status_kind == "acceptance_criteria" {
+                            criteria_retries += 1;
+                        } else {
+                            let _ = tx.send(StreamEvent::Status { kind: status_kind }).await;
+                        }
+                        steps += 1;
+                        continue;
+                    }
+                    Decision::Finish {
                         content,
                         reasoning,
                         finish_reason,
+                        drain_followups,
                     } => {
-                        request.messages.push(ChatMessage {
-                            id: format!("msg-{}", now_millis()),
-                            session_id: request.session_id.clone(),
-                            role: Role::Assistant,
-                            content: content.clone(),
-                            reasoning: reasoning.clone(),
-                            work_timeline: None,
-                            tool_activities: None,
-                            tool_calls: None,
-                            tool_call_id: None,
-                            name: None,
-                            status: MessageStatus::Done,
-                            timestamp: now_millis(),
-                            estimated_tokens: None,
-                        });
-                        if drain_soft_injects(&soft_queue, &mut request, &tx, &mut user_msg_index)
+                        if drain_followups {
+                            request.messages.push(ChatMessage {
+                                id: format!("msg-{}", now_millis()),
+                                session_id: request.session_id.clone(),
+                                role: Role::Assistant,
+                                content: content.clone(),
+                                reasoning: reasoning.clone(),
+                                work_timeline: None,
+                                tool_activities: None,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                name: None,
+                                status: MessageStatus::Done,
+                                timestamp: now_millis(),
+                                estimated_tokens: None,
+                            });
+                            if drain_soft_injects(
+                                &soft_queue,
+                                &mut request,
+                                &tx,
+                                &mut user_msg_index,
+                            )
                             .await
-                        {
-                            steps += 1;
-                            continue;
-                        }
-                        tokio::task::yield_now().await;
-                        if drain_soft_injects(&soft_queue, &mut request, &tx, &mut user_msg_index)
+                            {
+                                steps += 1;
+                                continue;
+                            }
+                            tokio::task::yield_now().await;
+                            if drain_soft_injects(
+                                &soft_queue,
+                                &mut request,
+                                &tx,
+                                &mut user_msg_index,
+                            )
                             .await
-                        {
-                            steps += 1;
-                            continue;
+                            {
+                                steps += 1;
+                                continue;
+                            }
                         }
                         let _ = tx
                             .send(StreamEvent::TurnComplete {
@@ -570,14 +570,12 @@ impl AgentRunner {
             };
 
             let mut user_denied = false;
-            completion_gate.record_tool_outcomes(&self.tools, &outcomes);
+            turn_end.record(&self.tools, &outcomes);
             verification_queue.record(&outcomes, &tool_ctx.workspace_root);
             for outcome in &outcomes {
                 if outcome.success
-                    && !matches!(
-                        outcome.tool_name.as_str(),
-                        "update_tasks" | "save_plan" | "wait_for_shell" | "read_shell_output"
-                    )
+                    && !matches!(outcome.tool_name.as_str(), "update_tasks" | "save_plan")
+                    && !super::agent_loop::turn_end::is_shell_poll(&outcome.tool_name)
                     && progress_evidence.insert((
                         outcome.tool_name.clone(),
                         outcome.arguments.clone(),
@@ -648,8 +646,9 @@ impl AgentRunner {
                 FailureAction::Continue => {}
             }
 
-            if let Some(status_kind) =
-                completion_gate.maybe_challenge_stall(&mut request, &mut user_msg_index)
+            if let Some(status_kind) = turn_end
+                .gate_mut()
+                .maybe_challenge_stall(&mut request, &mut user_msg_index)
             {
                 let _ = tx.send(StreamEvent::Status { kind: status_kind }).await;
             }
@@ -666,7 +665,7 @@ impl AgentRunner {
                 return Ok(());
             }
 
-            if completion_gate.repeated_without_progress() {
+            if turn_end.gate_mut().repeated_without_progress() {
                 let _ = tx.send(StreamEvent::TurnComplete {
                     content: "已暂停：相同工具调用反复返回相同结果，换策略提示后仍未获得新证据。任务尚未完成。".into(),
                     reasoning: None, tool_calls: vec![], finish_reason: Some("no_progress".into()),

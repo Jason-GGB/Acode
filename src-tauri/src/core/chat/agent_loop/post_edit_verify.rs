@@ -7,18 +7,9 @@ use crate::core::chat::agent_loop::types::ToolOutcome;
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::shell_jobs::run_foreground;
 
-/// File tools that count as a successful workspace mutation for auto-verify.
-pub const MUTATION_TOOL_NAMES: &[&str] = &[
-    "apply_patch",
-    "write_file",
-    "replace_in_file",
-    "replace_many_in_file",
-    "move_path",
-    "delete_text_range",
-    "delete_go_symbol",
-    "edit_notebook_cell",
-];
+pub use super::turn_end::MUTATION_TOOL_NAMES;
 
+/// File tools that count as a successful workspace mutation for auto-verify.
 pub fn is_mutation_tool(name: &str) -> bool {
     MUTATION_TOOL_NAMES.contains(&name)
 }
@@ -61,7 +52,9 @@ impl VerificationQueue {
                     ),
                 );
                 self.completed_checks.clear();
-            } else if outcome.tool_name == "run_shell" && shell_exit_code_ok(&outcome.result) {
+            } else if super::turn_end::counts_as_shell(&outcome.tool_name)
+                && shell_exit_code_ok(&outcome.result)
+            {
                 if let Ok(args) = serde_json::from_str::<serde_json::Value>(&outcome.arguments) {
                     if let Some(command) = args["command"].as_str() {
                         for check in verification_plan(workspace, &self.paths) {
@@ -273,8 +266,13 @@ fn javascript_checks(dir: &Path) -> Vec<String> {
 pub fn shell_exit_code_ok(output: &str) -> bool {
     for line in output.lines() {
         let trimmed = line.trim();
+        let trimmed = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or(trimmed);
         let Some(rest) = trimmed
             .strip_prefix("exit_code:")
+            .or_else(|| trimmed.strip_prefix("exit code:"))
             .or_else(|| trimmed.strip_prefix("exit_code: "))
         else {
             continue;
@@ -446,5 +444,7 @@ mod tests {
         assert!(shell_exit_code_ok(
             "status: done\nexit_code: Some(0)\nelapsed: 1s"
         ));
+        assert!(shell_exit_code_ok("output\n[exit code: 0]"));
+        assert!(!shell_exit_code_ok("output\n[exit code: 1]"));
     }
 }

@@ -11,6 +11,7 @@
 //! - [`mid_turn_compact`]: mid-turn auto-compact near the context window.
 //! - [`soft_inject`]: drains queued follow-up instructions into the request.
 //! - [`challenge`]: honest-completion / verification challenge policy.
+//! - [`turn_end`]: the only decision for a model step that called no tools.
 //! - [`failure`]: consecutive-failure and repeated-identical-error circuit
 //!   breaker.
 //! - [`tools`]: serial/parallel tool dispatch and tool-activity UI events.
@@ -23,4 +24,5 @@ pub mod soft_inject;
 pub mod stream_turn;
 pub mod task_state;
 pub mod tools;
+pub mod turn_end;
 pub mod types;
