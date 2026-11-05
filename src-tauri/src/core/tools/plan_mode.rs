@@ -226,8 +226,14 @@ mod tests {
         let store = PlanModeStore::new();
         assert!(store.planning_offer("exit_plan_mode", false));
         assert!(store.planning_offer("ask_user_question", false));
+        assert!(store.planning_offer("ask_user", false));
         assert!(store.planning_offer("subagent", false));
         assert!(store.planning_offer("save_plan", false));
+        assert!(store.planning_offer("update_tasks", false));
+        assert!(store.planning_offer("todo_write", false));
+        assert!(store.planning_offer("manage_plugin", false));
+        assert!(store.planning_offer("share_to_companion", false));
+        assert!(store.planning_offer("share_preview_url", false));
         assert!(store.planning_offer("read_file", true));
         assert!(!store.planning_offer("request_plan_mode", false));
         assert!(!store.planning_offer("complete_plan_step", false));
@@ -258,6 +264,27 @@ mod tests {
             assert!(error.is_plan_gate(), "{name}");
             assert_eq!(error.to_string(), PLAN_GATE_BLOCKED, "{name}");
         }
+    }
+
+    #[test]
+    fn planning_tools_run_while_the_gate_is_on() {
+        let store = PlanModeStore::new();
+        store.set_active("s", true);
+        for name in [
+            "save_plan",
+            "update_tasks",
+            "ask_user",
+            "ask_user_question",
+            "exit_plan_mode",
+            "subagent",
+            "share_to_companion",
+            "share_preview_url",
+            "todo_write",
+            "manage_plugin",
+        ] {
+            assert!(store.authorize("s", name, false).is_ok(), "{name}");
+        }
+        assert!(!store.is_awaiting_approval("s"));
     }
 
     #[test]

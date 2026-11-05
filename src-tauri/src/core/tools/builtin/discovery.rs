@@ -33,8 +33,7 @@ impl Tool for SearchToolsTool {
                 .into_iter()
                 .filter_map(|name| {
                     let tool = registry.get(&name)?;
-                    store
-                        .planning_offer(tool.name(), tool.read_only())
+                    (store.planning_offer(tool.name(), tool.read_only()) && tool.available())
                         .then(|| tool.schema())
                 })
                 .collect()
