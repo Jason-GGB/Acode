@@ -28,7 +28,7 @@ pub fn resolve_path_candidate(workspace: &Path, raw: &str) -> Result<PathBuf, To
     }
 
     let candidate = PathBuf::from(trimmed);
-    let resolved = if candidate.is_absolute() {
+    let resolved = if crate::core::runtime::request::path_is_absolute(&candidate) {
         candidate
     } else {
         workspace.join(candidate)

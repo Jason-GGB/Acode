@@ -1,7 +1,8 @@
 use super::super::paths::{
     count_open_tasks_from_args, extract_goal_paths, extract_paths_from_args, extract_shell_command,
     is_plan_approve_boilerplate, is_share_tool, is_write_tool, looks_like_local_dev_server,
-    paths_match, provides_completion_evidence, provides_verification_evidence, push_challenge_message,
+    paths_match, provides_completion_evidence, provides_verification_evidence,
+    push_challenge_message,
 };
 use super::super::text::{
     challenges_enabled, MAX_COMPLETION_RETRIES, MAX_NO_PROGRESS_REPEATS, STALL_CHALLENGE,
@@ -70,7 +71,9 @@ impl CompletionGate {
                         self.background_retries = 0;
                     }
                 }
-                Some(crate::core::chat::agent_loop::turn_end::JobWatch::HostStop) if outcome.success => {
+                Some(crate::core::chat::agent_loop::turn_end::JobWatch::HostStop)
+                    if outcome.success =>
+                {
                     self.take_finished_shell(id, outcome, &mut finished_jobs);
                 }
                 Some(crate::core::chat::agent_loop::turn_end::JobWatch::DshPoll) => {
@@ -80,7 +83,9 @@ impl CompletionGate {
                         self.background_retries = 0;
                     }
                 }
-                Some(crate::core::chat::agent_loop::turn_end::JobWatch::DshStop) if outcome.success => {
+                Some(crate::core::chat::agent_loop::turn_end::JobWatch::DshStop)
+                    if outcome.success =>
+                {
                     self.take_finished_shell(id, outcome, &mut finished_jobs);
                 }
                 _ => {}
@@ -116,12 +121,15 @@ impl CompletionGate {
                 continue;
             }
             for path in &self.mutated_paths {
-                let scope_matches = !crate::core::chat::agent_loop::turn_end::counts_as_shell(&outcome.tool_name)
-                    || self.workspace_root.as_ref().is_none_or(|root| {
-                        extract_shell_command(&outcome.arguments).is_some_and(|command| {
-                            crate::core::chat::agent_loop::post_edit_verify::check_targets_path(root, &command, path)
-                        })
-                    });
+                let scope_matches =
+                    !crate::core::chat::agent_loop::turn_end::counts_as_shell(&outcome.tool_name)
+                        || self.workspace_root.as_ref().is_none_or(|root| {
+                            extract_shell_command(&outcome.arguments).is_some_and(|command| {
+                                crate::core::chat::agent_loop::post_edit_verify::check_targets_path(
+                                    root, &command, path,
+                                )
+                            })
+                        });
                 if scope_matches
                     && provides_verification_evidence(outcome, &HashSet::from([path.clone()]))
                 {
@@ -234,7 +242,9 @@ impl CompletionGate {
             && crate::core::chat::agent_loop::turn_end::task_list_kind(&outcome.tool_name)
                 == Some(crate::core::chat::agent_loop::turn_end::TaskListKind::Todo)
         {
-            if let Some(count) = crate::core::chat::agent_loop::turn_end::open_todo_count(&outcome.arguments) {
+            if let Some(count) =
+                crate::core::chat::agent_loop::turn_end::open_todo_count(&outcome.arguments)
+            {
                 self.open_todo_count = count;
             }
         }

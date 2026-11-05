@@ -16,7 +16,7 @@ fn bundled_rg() -> Option<PathBuf> {
     for dir in candidate_dirs() {
         for name in sidecar_file_names() {
             let path = dir.join(name);
-            if path.is_file() {
+            if usable_sidecar(&path) {
                 return Some(path);
             }
         }
@@ -40,6 +40,10 @@ fn candidate_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(manifest).join("binaries"));
     }
     dirs
+}
+
+fn usable_sidecar(path: &Path) -> bool {
+    path.is_file() && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
 }
 
 fn sidecar_file_names() -> Vec<String> {
@@ -68,6 +72,16 @@ mod tests {
         let root = std::env::temp_dir().join("acode-rg-root");
         let file = root.join("src").join("lib.rs");
         assert_eq!(display_hit_path(&root, &file), "src/lib.rs");
+    }
+
+    #[test]
+    fn empty_sidecar_is_not_usable() {
+        let path = std::env::temp_dir().join("acode-rg-empty-sidecar");
+        std::fs::write(&path, []).expect("write empty sidecar");
+        assert!(!usable_sidecar(&path));
+        std::fs::write(&path, b"rg").expect("write sidecar bytes");
+        assert!(usable_sidecar(&path));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

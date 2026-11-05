@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::core::runtime::request::path_is_absolute;
 use crate::core::runtime::RequestContext;
 use crate::runtime::terminal::prepare_command;
 
@@ -11,7 +12,7 @@ pub fn infer(context: &RequestContext) -> Option<PathBuf> {
         .selected_files
         .iter()
         .map(PathBuf::from)
-        .find(|path| path.is_absolute() && is_file_candidate(path))
+        .find(|path| path_is_absolute(path) && is_file_candidate(path))
         .or_else(|| context.active_window.as_deref().and_then(path_from_title))
 }
 
@@ -32,7 +33,7 @@ fn path_from_title(title: &str) -> Option<PathBuf> {
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(PathBuf::from)
-        .find(|path| path.is_absolute() && is_file_candidate(path))
+        .find(|path| path_is_absolute(path) && is_file_candidate(path))
 }
 
 fn git_root(start: &Path) -> Option<PathBuf> {

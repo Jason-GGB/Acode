@@ -184,7 +184,8 @@ fn path_starts_with(path: &Path, root: &Path) -> bool {
                 .strip_prefix(&root)
                 .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
     } else {
-        path.starts_with(root)
+        path.starts_with(&root)
+            || crate::core::runtime::request::windows_drive_path_starts_with(&path, &root)
     }
 }
 

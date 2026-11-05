@@ -200,7 +200,7 @@ pub fn reject_workspace_escape_writes(
     let patterns = escape_write_path_candidates(command);
     for raw in patterns {
         let candidate = Path::new(&raw);
-        let resolved = if candidate.is_absolute() {
+        let resolved = if crate::core::runtime::request::path_is_absolute(candidate) {
             normalize_path(candidate)
         } else {
             normalize_path(&workspace.join(candidate))

@@ -29,7 +29,8 @@ pub(crate) fn looks_like_local_dev_server(tool_name: &str, arguments: &str, resu
         .get("run_in_background")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let promoted = crate::core::chat::agent_loop::turn_end::shell_kind(tool_name) == Some(crate::core::chat::agent_loop::turn_end::ShellKind::Dsh)
+    let promoted = crate::core::chat::agent_loop::turn_end::shell_kind(tool_name)
+        == Some(crate::core::chat::agent_loop::turn_end::ShellKind::Dsh)
         && crate::core::chat::agent_loop::turn_end::dsh_background_result(result);
     if !requested && !promoted {
         return false;
@@ -190,16 +191,22 @@ pub(crate) fn provides_completion_evidence(outcome: &ToolOutcome) -> bool {
     is_mutation_tool(&outcome.tool_name)
 }
 
-pub(crate) fn provides_verification_evidence(outcome: &ToolOutcome, mutated_paths: &HashSet<String>) -> bool {
+pub(crate) fn provides_verification_evidence(
+    outcome: &ToolOutcome,
+    mutated_paths: &HashSet<String>,
+) -> bool {
     if outcome.tool_name == "read_file" {
         let Some(path) = extract_path_from_args(&outcome.arguments) else {
             return false;
         };
         return mutated_paths.iter().any(|mutated| {
-            paths_match(mutated, &path) && !crate::core::chat::agent_loop::post_edit_verify::needs_executable_check(mutated)
+            paths_match(mutated, &path)
+                && !crate::core::chat::agent_loop::post_edit_verify::needs_executable_check(mutated)
         });
     }
-    if !crate::core::chat::agent_loop::turn_end::counts_as_shell(&outcome.tool_name) || !outcome.success {
+    if !crate::core::chat::agent_loop::turn_end::counts_as_shell(&outcome.tool_name)
+        || !outcome.success
+    {
         return false;
     }
     let Some(command) = extract_shell_command(&outcome.arguments) else {

@@ -1,7 +1,8 @@
 use super::super::paths::{paths_match, push_challenge_message};
 use super::super::text::{
-    COMPLETION_CHALLENGE, GOAL_COVERAGE_CHALLENGE, IMAGE_REQUIRED_CHALLENGE, LENGTH_EXCEEDED_CHALLENGE,
-    MAX_COMPLETION_RETRIES, SHARE_DELIVERABLE_CHALLENGE, VERIFICATION_CHALLENGE, ChallengeOutcome,
+    ChallengeOutcome, COMPLETION_CHALLENGE, GOAL_COVERAGE_CHALLENGE, IMAGE_REQUIRED_CHALLENGE,
+    LENGTH_EXCEEDED_CHALLENGE, MAX_COMPLETION_RETRIES, SHARE_DELIVERABLE_CHALLENGE,
+    VERIFICATION_CHALLENGE,
 };
 use super::CompletionGate;
 use crate::core::chat::agent_loop::types::{non_empty, now_millis};
@@ -155,7 +156,9 @@ impl CompletionGate {
                     user_msg_index,
                     content,
                     reasoning,
-                    &crate::core::chat::agent_loop::turn_end::pending_shell_message(&jobs, host, dsh),
+                    &crate::core::chat::agent_loop::turn_end::pending_shell_message(
+                        &jobs, host, dsh,
+                    ),
                 );
                 return ChallengeOutcome::ContinueWithChallenge {
                     status_kind: "wait_background_jobs".into(),

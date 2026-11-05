@@ -1,0 +1,12 @@
+{
+  "checkpoints": [
+    {
+      "turn": 1,
+      "time": 1793884374,
+      "prompt": "hello",
+      "files": [],
+      "userMessageId": "msg-9937a1e2-b6a6-49e4-a51a-7db572f75992",
+      "workspaceRoot": null
+    }
+  ]
+}

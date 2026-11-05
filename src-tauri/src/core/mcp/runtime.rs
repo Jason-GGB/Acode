@@ -117,16 +117,26 @@ pub fn find_node_exe() -> Option<PathBuf> {
     look_for_command("node", &search_dirs())
 }
 
-/// Resolve npm's JS entry (e.g. `npx-cli.js`) next to `node.exe`.
+/// Resolve npm's JS entry beside `node`, including the Unix `lib/node_modules` layout.
 pub fn find_npm_js_cli(cli_file: &str) -> Option<PathBuf> {
     let node = find_node_exe()?;
-    let cli = node
-        .parent()?
+    let node = std::fs::canonicalize(&node).unwrap_or(node);
+    let bin_dir = node.parent()?;
+    let beside_node = bin_dir
         .join("node_modules")
         .join("npm")
         .join("bin")
         .join(cli_file);
-    file_exists(&cli).then_some(cli)
+    let unix_lib = bin_dir
+        .join("..")
+        .join("lib")
+        .join("node_modules")
+        .join("npm")
+        .join("bin")
+        .join(cli_file);
+    [beside_node, unix_lib]
+        .into_iter()
+        .find(|path| file_exists(path))
 }
 
 /// Locates a `uvx` executable on the current PATH.
