@@ -3,21 +3,23 @@ import { expect, it } from "vitest";
 import { shallowMount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { createPinia } from "pinia";
+import { projectMessageTimeline } from "@/services/chat/sessionTimeline";
 import AgentWorkDetails from "./AgentWorkDetails.vue";
 
 it("does not retain completed work segment views while their fold is closed", async () => {
+  const message = {
+    id: "assistant-1",
+    sessionId: "session-1",
+    role: "assistant" as const,
+    status: "done" as const,
+    content: "Final answer",
+    reasoning: "A completed reasoning segment",
+    timestamp: 1,
+  };
   const wrapper = shallowMount(AgentWorkDetails, {
     props: {
-      showReasoning: true,
-      message: {
-        id: "assistant-1",
-        sessionId: "session-1",
-        role: "assistant",
-        status: "done",
-        content: "Final answer",
-        reasoning: "A completed reasoning segment",
-        timestamp: 1,
-      },
+      message,
+      segments: projectMessageTimeline(message, { showReasoning: true, displayMode: "detailed" }),
     },
     global: { plugins: [createPinia()] },
   });
@@ -46,7 +48,10 @@ it("keeps overlay guidance out of the assistant timeline without copying the mes
     workTimeline: [{ type: "inject" as const, id: "guidance-1", content: "Follow-up" }],
   };
   const wrapper = shallowMount(AgentWorkDetails, {
-    props: { message, hideTimelineInject: true },
+    props: {
+      message,
+      segments: projectMessageTimeline(message, { inline: true }),
+    },
     global: { plugins: [createPinia()] },
   });
   expect(wrapper.find(".agent-work").exists()).toBe(false);

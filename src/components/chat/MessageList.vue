@@ -241,11 +241,9 @@
                 </button>
                 <AgentWorkDetails
                   :message="item.message"
-                  :hide-timeline-inject="inlineConversation"
+                  :segments="item.timeline"
                   :language="settingStore.language"
-                  :show-reasoning="settingStore.showReasoning"
                   :display-mode="settingStore.agentWorkDisplay"
-                  :suppress-content="needsProviderSetup(item.message)"
                   @inspect-subagent="emit('inspectSubagent', $event)"
                   @preview-image="emit('previewImage', $event)"
                   @edit-from-image="emit('editFromImage', $event)"
@@ -477,7 +475,9 @@ import {
 } from "@/services/chat/selectionAttachment";
 import { extractAttachedFileChips, type AttachedFileChip } from "@/services/chat/attachFiles";
 import { isSoftInjectContent, stripSoftInjectMarker } from "@/services/chat/softInject";
-import { withTimelineInject } from "@/stores/chatStream";
+import { hasSynchronizedLiveTimeline } from "@/stores/chatStream";
+import { projectSession } from "@/services/chat/sessionProjection";
+import type { WorkSegment } from "@/services/chat/sessionTimeline";
 import { isAskUserTool } from "@/services/chat/askUserAnswer";
 import { isCompactionSummary } from "@/services/chat/compactMarker";
 import {
@@ -510,7 +510,7 @@ import { storeToRefs } from "pinia";
 
 type DisplayItem =
   | { kind: "user"; key: string; message: ChatMessage }
-  | { kind: "assistant"; key: string; message: ChatMessage }
+  | { kind: "assistant"; key: string; message: ChatMessage; timeline?: WorkSegment[] }
   | { kind: "inject"; key: string; message: ChatMessage };
 
 type DisplayTurn = {
@@ -858,49 +858,34 @@ const displayTurns = computed((): DisplayTurn[] => {
     void chatStore.sessionPlans[props.sessionId];
     void chatStore.sessionPlanMode[props.sessionId];
   }
-  const turns: DisplayTurn[] = [];
-  let current: DisplayTurn | null = null;
-  for (const item of displayItems.value) {
-    if (item.kind === "user") {
-      if (current) turns.push(current);
-      current = { key: `turn-${item.key}`, user: item, body: [] };
-      continue;
-    }
-    if (item.kind === "inject") {
-      if (props.inlineConversation && current) {
-        current.body.push(item);
-        continue;
-      }
-      if (current) {
-        let assistantIndex = -1;
-        for (let index = current.body.length - 1; index >= 0; index -= 1) {
-          if (current.body[index]?.kind === "assistant") {
-            assistantIndex = index;
-            break;
+  const synchronizedMessageIds = new Set(
+    props.messages
+      .filter((message) => hasSynchronizedLiveTimeline(message))
+      .map((message) => message.id),
+  );
+  const projection = projectSession({
+    messages: props.messages,
+    sending: Boolean(props.sessionId && sending.value[props.sessionId]),
+    inline: props.inlineConversation,
+    showReasoning: settingStore.showReasoning,
+    displayMode: settingStore.agentWorkDisplay,
+    suppressContentIds: props.messages.filter(needsProviderSetup).map((message) => message.id),
+    synchronizedMessageIds,
+  });
+  return projection.turns.map((turn) => ({
+    key: turn.key,
+    user: turn.user ? { kind: "user" as const, key: turn.user.id, message: turn.user } : null,
+    body: turn.body.map((item) =>
+      item.kind === "assistant"
+        ? {
+            kind: "assistant" as const,
+            key: item.message.id,
+            message: item.message,
+            timeline: item.timeline ?? [],
           }
-        }
-        if (assistantIndex !== -1) {
-          const assistant = current.body[assistantIndex]!;
-          current.body[assistantIndex] = {
-            ...assistant,
-            message: withTimelineInject(assistant.message, item.message),
-          };
-          continue;
-        }
-        current.body.push(item);
-      } else {
-        current = { key: `turn-${item.key}`, user: null, body: [item] };
-      }
-      continue;
-    }
-    if (!current) {
-      current = { key: `turn-${item.key}`, user: null, body: [item] };
-    } else {
-      current.body.push(item);
-    }
-  }
-  if (current) turns.push(current);
-  return turns;
+        : { kind: "inject" as const, key: item.message.id, message: item.message },
+    ),
+  }));
 });
 
 const queuedMessages = computed<ChatMessage[]>(() => {

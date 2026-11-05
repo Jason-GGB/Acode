@@ -95,8 +95,8 @@
               <Markdown :content="activeEntry.task" />
               <AgentWorkDetails
                 :message="activeEntry.message"
+                :segments="activeTimeline"
                 :language="settingStore.language"
-                :show-reasoning="settingStore.showReasoning"
                 :display-mode="settingStore.agentWorkDisplay"
               />
             </div>
@@ -122,6 +122,7 @@ import { ChevronRight, X } from "@lucide/vue";
 import AgentWorkDetails from "@/components/chat/AgentWorkDetails.vue";
 import Markdown from "@/components/chat/Markdown.vue";
 import SubagentIcon from "@/components/chat/SubagentIcon.vue";
+import { projectMessageTimeline } from "@/services/chat/sessionTimeline";
 import { useSettingStore } from "@/stores/setting";
 import { tr } from "@/services/i18n";
 import type { ChatMessage, MessageStatus, ToolActivity } from "@/types/chat";
@@ -191,6 +192,14 @@ const agentEntries = computed<AgentEntry[]>(() => {
 
 const activeEntry = computed(
   () => agentEntries.value.find((entry) => entry.id === activeId.value) ?? agentEntries.value[0],
+);
+const activeTimeline = computed(() =>
+  activeEntry.value
+    ? projectMessageTimeline(activeEntry.value.message, {
+        showReasoning: settingStore.showReasoning,
+        displayMode: settingStore.agentWorkDisplay,
+      })
+    : [],
 );
 
 watch(

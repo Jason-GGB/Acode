@@ -85,17 +85,11 @@ import Markdown from "@/components/chat/Markdown.vue";
 import ReasoningBlock from "@/components/chat/ReasoningBlock.vue";
 import SoftInjectCard from "@/components/chat/SoftInjectCard.vue";
 import ToolActivityList from "@/components/chat/ToolActivityList.vue";
-import type { AskUserAnswerItem, ToolActivity } from "@/types/chat";
+import type { ToolActivity } from "@/types/chat";
+import type { WorkSegment } from "@/services/chat/sessionTimeline";
 import type { AppLanguage } from "@/types/setting";
 
-export type WorkSegment =
-  | { type: "reasoning"; id: string; content: string }
-  | { type: "narration"; id: string; content: string }
-  | { type: "content"; id: string; content: string }
-  | { type: "inject"; id: string; content: string }
-  | { type: "ask-answer"; id: string; items: AskUserAnswerItem[] }
-  | { type: "inline"; id: string; activities: ToolActivity[]; operations: boolean }
-  | { type: "process"; id: string; activities: ToolActivity[]; operations: boolean };
+export type { WorkSegment };
 
 defineProps<{
   segment: WorkSegment;

@@ -455,6 +455,7 @@ import {
   openImagePreview,
   branchChatSession,
 } from "@/services/ipc";
+import { projectSession } from "@/services/chat/sessionProjection";
 import { useChatStore } from "@/stores/chat";
 import { useChatSessionsStore } from "@/stores/chatSessions";
 import { useSettingStore } from "@/stores/setting";
@@ -680,20 +681,14 @@ const sidebarCloseLabel = computed(() => tr(settingStore.language, "sidebar.clos
 const hasVisibleMessages = computed(() =>
   messages.value.some((message) => String(message.role).toLowerCase() !== "system"),
 );
-const sending = computed(() => {
-  const sessionId = activeSessionId.value;
-  if (!sessionId) {
-    return false;
-  }
-  if (chatStore.sending[sessionId]) {
-    return true;
-  }
-  return messages.value.some(
-    (message) =>
-      String(message.role).toLowerCase() === "assistant" &&
-      (message.status === "pending" || message.status === "streaming"),
-  );
-});
+const overlayProjection = computed(() =>
+  projectSession({
+    messages: messages.value,
+    sending: Boolean(activeSessionId.value && chatStore.sending[activeSessionId.value]),
+  }),
+);
+const sending = computed(() => overlayProjection.value.outputting);
+const activeAssistantMessageId = computed(() => overlayProjection.value.outputtingMessageId);
 const contextNotice = computed(() => overlayContextNotice.value);
 const workspaceDisplayName = computed(() => props.capturedContext?.workspace?.name?.trim() || "");
 const boundWorkspaceId = computed(() => {
@@ -1103,17 +1098,6 @@ async function scheduleOverlayInputFocus() {
   // delayed native retries can steal focus back from a picker or another app.
   void inputRef.value?.focusInput();
 }
-
-const activeAssistantMessageId = computed(() => {
-  const last = [...messages.value]
-    .reverse()
-    .find(
-      (message) =>
-        String(message.role).toLowerCase() === "assistant" &&
-        (message.status === "pending" || message.status === "streaming"),
-    );
-  return last?.id ?? "";
-});
 
 async function handlePause() {
   if (!sending.value) {

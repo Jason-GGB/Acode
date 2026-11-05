@@ -90,7 +90,7 @@
 import { ChevronRight } from "@lucide/vue";
 import { computed, inject, reactive, ref, watch } from "vue";
 import AgentWorkSegment, { type WorkSegment } from "@/components/chat/AgentWorkSegment.vue";
-import type { ChatMessage, ToolActivity } from "@/types/chat";
+import type { ChatMessage } from "@/types/chat";
 import type { AgentWorkDisplay, AppLanguage } from "@/types/setting";
 import { askUserAnswersForActivity, isAskUserTool } from "@/services/chat/askUserAnswer";
 import { shouldHidePlanChromeActivity } from "@/services/chat/planProposal";
@@ -105,23 +105,18 @@ import { activityMatchesQuery, textIncludesQuery } from "@/services/chat/convers
 import { conversationFindKey } from "@/composables/chat/useConversationFind";
 import { isImageGenActivity } from "@/services/chat/toolActivityEnrichment";
 import { tr } from "@/services/i18n";
-import { hasSynchronizedLiveTimeline } from "@/stores/chatStream";
 
 const props = withDefaults(
   defineProps<{
     message: ChatMessage;
     language?: AppLanguage;
-    showReasoning?: boolean;
     /** detailed = shell/diff inline; compact = fold into process details. */
     displayMode?: AgentWorkDisplay;
-    /** Content is a special-cased marker (e.g. "configure a provider") rendered
-     * elsewhere, so skip showing it as regular inline text here. */
-    suppressContent?: boolean;
-    /** The overlay displays injected user guidance as its own message row. */
-    hideTimelineInject?: boolean;
+    segments?: WorkSegment[];
   }>(),
   {
     displayMode: "detailed",
+    segments: () => [],
   },
 );
 const emit = defineEmits<{
@@ -133,7 +128,6 @@ const emit = defineEmits<{
 type TimelineSegment = WorkSegment;
 
 const SHOWCASE_KINDS = new Set(["shell", "create", "edit", "delete", "move", "image"]);
-const TASK_LIST_TOOLS = new Set(["update_tasks", "todo_write"]);
 
 const processOpen = reactive(new Map<string, boolean>());
 const userToggledProcess = reactive(new Set<string>());
@@ -163,9 +157,6 @@ const visibleActivities = computed(() =>
       !shouldHidePlanChromeActivity(activity, props.message),
   ),
 );
-const activityById = computed(
-  () => new Map(recordedActivities.value.map((activity) => [activity.id, activity])),
-);
 
 const hasRunningSubagent = computed(() =>
   recordedActivities.value.some(
@@ -173,322 +164,7 @@ const hasRunningSubagent = computed(() =>
   ),
 );
 
-/** Task lists + finished images + (in detailed mode) shell/file edits stay in the open stream. */
-function isInlineActivity(activity: ToolActivity): boolean {
-  if (isImageGenActivity(activity)) return activity.status !== "running";
-  if (TASK_LIST_TOOLS.has(activity.toolName)) return true;
-  if (props.displayMode === "compact") return false;
-  return SHOWCASE_KINDS.has(activity.kind);
-}
-
-function isOperationsActivity(activity: ToolActivity): boolean {
-  return (
-    SHOWCASE_KINDS.has(activity.kind) && activity.kind !== "shell" && activity.kind !== "image"
-  );
-}
-
-function segmentKind(activity: ToolActivity): "inline" | "process" {
-  return isInlineActivity(activity) ? "inline" : "process";
-}
-
-function canMergeActivities(last: ToolActivity, next: ToolActivity): boolean {
-  // Keep image cards in their own segment so the completed fold can leave
-  // them visible without also un-collapsing adjacent shell/file work.
-  if (isImageGenActivity(last) || isImageGenActivity(next)) {
-    return isImageGenActivity(last) && isImageGenActivity(next);
-  }
-  return isOperationsActivity(last) === isOperationsActivity(next);
-}
-
-function pushActivity(segments: TimelineSegment[], activity: ToolActivity) {
-  const kind = segmentKind(activity);
-  const operations = isOperationsActivity(activity);
-  const last = segments[segments.length - 1];
-  if (
-    last &&
-    last.type === kind &&
-    last.operations === operations &&
-    last.activities[0] &&
-    canMergeActivities(last.activities[0], activity)
-  ) {
-    if (!last.activities.some((item) => item.id === activity.id)) {
-      last.activities.push(activity);
-    }
-    return;
-  }
-  const base = {
-    id: `${kind}-${activity.id}`,
-    activities: [activity],
-    operations,
-  };
-  segments.push(kind === "inline" ? { type: "inline", ...base } : { type: "process", ...base });
-}
-
-function considerAskUser(segments: TimelineSegment[], seen: Set<string>, activity: ToolActivity) {
-  if (seen.has(activity.id)) return;
-  seen.add(activity.id);
-  const items = askUserAnswersForActivity(activity, props.message.askUserAnswer);
-  if (items.length > 0) {
-    segments.push({
-      type: "ask-answer",
-      id: `ask-answer-${activity.id}`,
-      items,
-    });
-    return;
-  }
-  if (activity.status === "running") {
-    pushActivity(segments, activity);
-  }
-}
-
-/** Same parallel batch can be recorded under new activity ids on stream retry. */
-function parallelSubagentFingerprint(activity: ToolActivity): string | undefined {
-  if (activity.toolName !== "run_parallel_subagents") return undefined;
-  const tasks = activity.arguments?.tasks;
-  if (!Array.isArray(tasks)) return activity.id;
-  const prompts = tasks.map((value) => {
-    if (typeof value !== "object" || value == null) return "";
-    return String((value as Record<string, unknown>).prompt ?? "").trim();
-  });
-  return `${activity.toolName}:${prompts.join("\0")}`;
-}
-
-function considerActivity(segments: TimelineSegment[], seen: Set<string>, activity: ToolActivity) {
-  if (seen.has(activity.id)) return;
-  seen.add(activity.id);
-  const fingerprint = parallelSubagentFingerprint(activity);
-  if (fingerprint) {
-    for (const segment of segments) {
-      if (segment.type !== "process" && segment.type !== "inline") continue;
-      const index = segment.activities.findIndex(
-        (item) => parallelSubagentFingerprint(item) === fingerprint,
-      );
-      if (index !== -1) {
-        segment.activities[index] = activity;
-        return;
-      }
-    }
-  }
-  pushActivity(segments, activity);
-}
-
-type TextSegment = Extract<TimelineSegment, { type: "reasoning" | "content" }>;
-
-function isTextSegment(segment: TimelineSegment): segment is TextSegment {
-  return segment.type === "reasoning" || segment.type === "content";
-}
-
-/**
- * Append any part of `finalText` that isn't already covered by the matching
- * segments in `out`. Keeps the reply visible even when the timeline is
- * missing, partial, or stale without mutating reactive timeline items.
- */
-function reconcileTrailingText(
-  out: TimelineSegment[],
-  kind: "reasoning" | "content",
-  finalText: string | undefined,
-) {
-  const finalValue = finalText ?? "";
-  if (!finalValue) return;
-  let accumulated = "";
-  for (const segment of out) {
-    if (isTextSegment(segment) && segment.type === kind) accumulated += segment.content;
-  }
-  if (finalValue === accumulated) return;
-
-  if (!accumulated || finalValue.startsWith(accumulated)) {
-    const missing = finalValue.slice(accumulated.length);
-    if (!missing) return;
-    const last = out[out.length - 1];
-    if (last && isTextSegment(last) && last.type === kind) {
-      last.content += missing;
-    } else {
-      out.push({
-        type: kind,
-        id: `${kind}-final-${out.length}`,
-        content: missing,
-      } as TimelineSegment);
-    }
-    return;
-  }
-
-  if (accumulated.includes(finalValue)) return;
-  const notice = finalValue.trim();
-  if (!notice) return;
-  if (accumulated.includes(notice)) return;
-  out.push({
-    type: kind,
-    id: `${kind}-final-${out.length}`,
-    content: notice.startsWith("已停止") || notice.startsWith("Stopped") ? `\n\n${notice}` : notice,
-  } as TimelineSegment);
-}
-
-/**
- * Once the turn is finished, fold every interleaved reasoning chunk into a
- * single entry so the completed fold stays short.
- */
-function coalesceCompletedReasoning(out: TimelineSegment[]): TimelineSegment[] {
-  if (streaming.value) return out;
-  const fromMessage = props.message.reasoning?.trim() ?? "";
-  const fromSegments = out
-    .filter((segment): segment is Extract<TimelineSegment, { type: "reasoning" }> => {
-      return segment.type === "reasoning";
-    })
-    .map((segment) => segment.content)
-    .join("");
-  const combined = pickFullText(fromMessage, fromSegments);
-  const withoutReasoning = out.filter((segment) => segment.type !== "reasoning");
-  if (!combined || props.showReasoning === false) return withoutReasoning;
-
-  const firstIdx = out.findIndex((segment) => segment.type === "reasoning");
-  const block: TimelineSegment = {
-    type: "reasoning",
-    id: `${props.message.id}-reasoning-completed`,
-    content: combined,
-  };
-  if (firstIdx <= 0) return [block, ...withoutReasoning];
-
-  const before = out.slice(0, firstIdx).filter((segment) => segment.type !== "reasoning");
-  const after = out.slice(firstIdx).filter((segment) => segment.type !== "reasoning");
-  return [...before, block, ...after];
-}
-
-function pickFullText(fromMessage: string, fromSegments: string): string {
-  if (!fromMessage) return fromSegments;
-  if (!fromSegments) return fromMessage;
-  if (fromMessage === fromSegments) return fromMessage;
-  if (fromMessage.startsWith(fromSegments)) return fromMessage;
-  if (fromSegments.startsWith(fromMessage)) return fromSegments;
-  return fromSegments.length >= fromMessage.length ? fromSegments : fromMessage;
-}
-
-/**
- * After tools finish, fold mid-turn narration (content before the last tool)
- * into a collapsed narration block. Only the final reply after the last tool
- * stays outside the completed fold.
- */
-function coalesceCompletedNarration(out: TimelineSegment[]): TimelineSegment[] {
-  if (streaming.value) return out;
-  const hasTools = out.some(
-    (segment) =>
-      segment.type === "process" || segment.type === "inline" || segment.type === "ask-answer",
-  );
-  if (!hasTools) return out;
-
-  let lastToolIdx = -1;
-  for (let i = 0; i < out.length; i++) {
-    if (out[i].type === "process" || out[i].type === "inline" || out[i].type === "ask-answer") {
-      lastToolIdx = i;
-    }
-  }
-  if (lastToolIdx < 0) return out;
-
-  const intermediate: string[] = [];
-  const kept: TimelineSegment[] = [];
-  let insertAt = 0;
-
-  for (let i = 0; i < out.length; i++) {
-    const segment = out[i];
-    if (segment.type === "content" && i < lastToolIdx) {
-      if (segment.content.trim()) intermediate.push(segment.content.trim());
-      if (intermediate.length === 1) insertAt = kept.length;
-      continue;
-    }
-    kept.push(segment);
-  }
-
-  const joined = intermediate.join("\n\n").trim();
-  const hasVisibleReply = kept.some((segment) => segment.type === "content");
-
-  let visibleTail = "";
-  let folded = joined;
-  if (!hasVisibleReply && intermediate.length > 0) {
-    visibleTail = intermediate[intermediate.length - 1] ?? "";
-    folded = intermediate.slice(0, -1).join("\n\n").trim();
-  }
-
-  if (folded) {
-    if (kept[0]?.type === "reasoning") {
-      insertAt = Math.max(insertAt, 1);
-    }
-    kept.splice(insertAt, 0, {
-      type: "narration",
-      id: `${props.message.id}-narration-completed`,
-      content: folded,
-    });
-  }
-
-  if (visibleTail) {
-    kept.push({
-      type: "content",
-      id: `${props.message.id}-narration-tail`,
-      content: visibleTail,
-    });
-  }
-
-  return kept;
-}
-
-/** Single chronological stream with process-detail chunks interleaved. */
-const segments = computed<TimelineSegment[]>(() => {
-  let out: TimelineSegment[] = [];
-  const timeline = props.message.workTimeline ?? [];
-  const seen = new Set<string>();
-
-  for (const item of timeline) {
-    if (item.type === "content" && props.suppressContent) continue;
-    if (item.type === "inject") {
-      if (props.hideTimelineInject) continue;
-      if (item.content.trim()) {
-        out.push({ type: "inject", id: item.id, content: item.content });
-      }
-      continue;
-    }
-    if (item.type === "reasoning" || item.type === "content") {
-      if (item.content.trim()) {
-        out.push({ ...item });
-      }
-      continue;
-    }
-    const activity = activityById.value.get(item.toolActivityId);
-    if (!activity) continue;
-    if (shouldHidePlanChromeActivity(activity, props.message)) {
-      seen.add(activity.id);
-      continue;
-    }
-    if (isAskUserTool(activity.toolName)) {
-      considerAskUser(out, seen, activity);
-      continue;
-    }
-    considerActivity(out, seen, activity);
-  }
-
-  // The live append path writes the same delta to both fields and timeline.
-  // Avoid concatenating the entire growing timeline on every streamed chunk.
-  if (!streaming.value || !hasSynchronizedLiveTimeline(props.message)) {
-    reconcileTrailingText(out, "reasoning", props.message.reasoning);
-    if (!props.suppressContent) {
-      reconcileTrailingText(out, "content", props.message.content);
-    }
-  }
-
-  if (props.showReasoning === false) {
-    out = out.filter((segment) => segment.type !== "reasoning");
-  }
-
-  for (const activity of recordedActivities.value) {
-    if (shouldHidePlanChromeActivity(activity, props.message)) {
-      seen.add(activity.id);
-      continue;
-    }
-    if (isAskUserTool(activity.toolName)) {
-      considerAskUser(out, seen, activity);
-      continue;
-    }
-    considerActivity(out, seen, activity);
-  }
-  return coalesceCompletedNarration(coalesceCompletedReasoning(out));
-});
+const segments = computed(() => props.segments ?? []);
 
 function isGeneratedImageSegment(segment: TimelineSegment): boolean {
   return (

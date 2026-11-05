@@ -15,7 +15,7 @@ import { conversationConsumedTokens } from "@/services/chat/tokenEstimate";
 import { formatSessionPreview } from "@/services/chat/sessionPreview";
 import { isSubagentSessionId, rootSessionId } from "@/services/chat/subagentSession";
 import { isPluginAgentSessionId } from "@/services/chat/pluginSession";
-import { findSubagentEntry } from "@/services/chat/subagentPanel";
+import { projectSession } from "@/services/chat/sessionProjection";
 import { useSubagentSessionStore } from "@/stores/subagentSessions";
 import { useSettingStore } from "@/stores/setting";
 import { useChatStore } from "@/stores/chat";
@@ -153,31 +153,40 @@ export function useWorkbenchSessions(options: UseWorkbenchSessionsOptions) {
   );
   const sending = computed(
     () =>
-      Boolean(chatStore.sending[activeSessionId.value]) ||
-      chatStore.hasActiveAssistantResponse(activeSessionId.value),
+      projectSession({
+        messages: chatStore.sessions[activeSessionId.value] ?? [],
+        sending: Boolean(chatStore.sending[activeSessionId.value]),
+      }).outputting,
   );
   const runningSessionIds = computed(() => {
-    const ids = new Set(
-      Object.entries(chatStore.sending)
-        .filter(([, busy]) => Boolean(busy))
-        .map(([sessionId]) => sessionId),
-    );
-    for (const [sessionId, messages] of Object.entries(chatStore.sessions)) {
+    const ids = new Set<string>();
+    for (const [sessionId, busy] of Object.entries(chatStore.sending)) {
       if (
-        messages.some(
-          (message) =>
-            String(message.role).toLowerCase() === "assistant" &&
-            (message.status === "pending" || message.status === "streaming"),
-        )
+        projectSession({
+          messages: chatStore.sessions[sessionId] ?? [],
+          sending: Boolean(busy),
+        }).outputting
       ) {
+        ids.add(sessionId);
+      }
+    }
+    for (const [sessionId, sessionMessages] of Object.entries(chatStore.sessions)) {
+      if (ids.has(sessionId)) continue;
+      if (projectSession({ messages: sessionMessages, sending: false }).outputting) {
         ids.add(sessionId);
       }
     }
     for (const record of subagentSessionStore.visibleRecords) {
       const parentMessages = chatStore.sessions[record.parentSessionId] ?? [];
-      const activities = parentMessages.flatMap((message) => message.toolActivities ?? []);
-      const entry = findSubagentEntry(activities, record.entryId, settingStore.language);
-      if (entry?.status === "running") {
+      if (
+        projectSession({
+          messages: chatStore.sessions[record.sessionId] ?? [],
+          sending: Boolean(chatStore.sending[record.sessionId]),
+          parentActivities: parentMessages.flatMap((message) => message.toolActivities ?? []),
+          subagentEntryId: record.entryId,
+          language: settingStore.language,
+        }).outputting
+      ) {
         ids.add(record.sessionId);
       }
     }
@@ -187,13 +196,10 @@ export function useWorkbenchSessions(options: UseWorkbenchSessionsOptions) {
   const contextNotice = computed(() => chatStore.contextNotices[activeSessionId.value] ?? "");
   const activeAssistantMessageId = computed(
     () =>
-      [...messages.value]
-        .reverse()
-        .find(
-          (message) =>
-            String(message.role).toLowerCase() === "assistant" &&
-            (message.status === "pending" || message.status === "streaming"),
-        )?.id ?? "",
+      projectSession({
+        messages: messages.value,
+        sending: false,
+      }).outputtingMessageId,
   );
 
   function createSessionId() {

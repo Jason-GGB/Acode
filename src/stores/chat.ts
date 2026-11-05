@@ -73,6 +73,7 @@ import {
 } from "./chatStream";
 import { useChatSessionsStore } from "./chatSessions";
 import { planFromHistory, tasksFromHistory } from "@/services/chat/planProposal";
+import { projectSession } from "@/services/chat/sessionProjection";
 import { optimisticUserMatchesServer } from "@/services/chat/optimisticMatch";
 import { serializeStaged } from "@/services/chat/stagedOperations";
 
@@ -1569,10 +1570,11 @@ export const useChatStore = defineStore("chat", {
       }
     },
     hasActiveAssistantResponse(sessionId: string) {
-      return (sessionsStore().sessions[sessionId] ?? []).some(
-        (message) =>
-          normalizeRole(message.role) === "assistant" &&
-          (message.status === "pending" || message.status === "streaming"),
+      return Boolean(
+        projectSession({
+          messages: sessionsStore().sessions[sessionId] ?? [],
+          sending: false,
+        }).outputtingMessageId,
       );
     },
     completeAskUserToolActivities(sessionId: string, answer?: string) {
@@ -1731,7 +1733,10 @@ export const useChatStore = defineStore("chat", {
         return false;
       }
 
-      const busy = Boolean(this.sending[sessionId] || this.hasActiveAssistantResponse(sessionId));
+      const busy = projectSession({
+        messages: sessionsStore().sessions[sessionId] ?? [],
+        sending: Boolean(this.sending[sessionId]),
+      }).outputting;
 
       if (options?.resumePlan && busy) {
         // Never stage an approval continuation for later; the plan card only

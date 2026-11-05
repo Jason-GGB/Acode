@@ -1,6 +1,6 @@
 # Acode
 
-桌面助手里，一次会话如何把工具交给模型、在计划被批准前拦住写入，以及模型不再调用工具时这一轮如何结束。
+桌面助手里，一次会话如何把工具交给模型、在计划被批准前拦住写入、模型不再调用工具时这一轮如何结束，以及一条 session 在屏幕上呈现成什么样。
 
 ## Language
 
@@ -23,3 +23,7 @@ _Avoid_: error text, allowlist
 **Turn end**:
 模型没有再调用工具时，这一轮是就此结束，还是被追问后继续。用户暂停是其中一种结束。
 _Avoid_: TurnComplete, completion gate, verification queue
+
+**Session projection**:
+按一条 session 交出用户看得见的 turn、timeline，以及这条 session 是否还在输出。
+_Avoid_: view model, selector, derived state

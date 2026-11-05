@@ -23,8 +23,8 @@
       <AgentWorkDetails
         v-if="viewMessage"
         :message="viewMessage"
+        :segments="viewTimeline"
         :language="language"
-        :show-reasoning="showReasoning"
         :display-mode="displayMode"
       />
 
@@ -54,6 +54,7 @@ import {
   entryIdFromPanelSession,
   findSubagentEntry,
 } from "@/services/chat/subagentPanel";
+import { projectMessageTimeline } from "@/services/chat/sessionTimeline";
 import { tr } from "@/services/i18n";
 import { useSubagentSessionStore } from "@/stores/subagentSessions";
 import type { ChatMessage } from "@/types/chat";
@@ -93,6 +94,14 @@ const viewMessage = computed(() => {
   if (!entry.value || !parentActivity.value) return null;
   return buildSubagentViewMessage(entry.value, parentActivity.value, parentActivities.value);
 });
+const viewTimeline = computed(() =>
+  viewMessage.value
+    ? projectMessageTimeline(viewMessage.value, {
+        showReasoning: props.showReasoning,
+        displayMode: props.displayMode,
+      })
+    : [],
+);
 
 const statusLabel = computed(() => {
   const status = entry.value?.status ?? "running";
