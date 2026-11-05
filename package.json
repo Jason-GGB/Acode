@@ -30,7 +30,7 @@
     "test:office-runtime": "node --test scripts/office/runtime.test.mjs"
   },
   "simple-git-hooks": {
-    "pre-commit": "pnpm lint-staged"
+    "pre-commit": "sh scripts/lint-staged.sh"
   },
   "lint-staged": {
     "*.{ts,vue}": [
