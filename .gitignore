@@ -32,9 +32,8 @@ release/**
 !release/Acode_0.2.31_GITHUB_RELEASE.md
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
+.cursor/
+.vscode/
 .idea
 .DS_Store
 *.suo
@@ -80,9 +79,6 @@ src-tauri/*.txt
 src-tauri/plugins/**/data/
 src-tauri/plugins/**/ui/.acode/
 src-tauri/plugins/**/node_modules/
-
-# Cursor local plans (keep .cursor/rules committed)
-.cursor/plans/
 
 # OS junk
 Thumbs.db
