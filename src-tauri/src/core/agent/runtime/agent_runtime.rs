@@ -557,12 +557,10 @@ impl AgentRuntimeInner {
             result_length = result.len(),
             "agent tool completed"
         );
-        if !success {
-            self.fail(run_id, format!("tool {tool} failed"));
-            return;
-        }
-        for path in changed_files {
-            self.push_event(run_id, AgentEvent::FileChanged { path: path.clone() });
+        if success {
+            for path in changed_files {
+                self.push_event(run_id, AgentEvent::FileChanged { path: path.clone() });
+            }
         }
         match self.current_state(run_id) {
             Some(AgentState::WaitingTool | AgentState::Executing | AgentState::Planning) => {
@@ -767,13 +765,13 @@ impl EventBus for AgentEventBridge {
                     timestamp_ms: *timestamp_ms,
                 });
             }
-            BusEvent::ChatFinished { finish_reason, .. } => {
-                if finish_reason.as_deref() == Some("cancelled") {
-                    self.inner.cancel(&self.run_id);
-                } else {
-                    self.inner.complete(&self.run_id);
+            BusEvent::ChatFinished { finish_reason, .. } => match finish_reason.as_deref() {
+                Some("cancelled") => self.inner.cancel(&self.run_id),
+                Some(reason @ "tool_failure_breaker") => {
+                    self.inner.fail(&self.run_id, reason.to_string())
                 }
-            }
+                _ => self.inner.complete(&self.run_id),
+            },
             BusEvent::ChatError { message, .. } => {
                 self.inner.fail(&self.run_id, message.clone());
             }

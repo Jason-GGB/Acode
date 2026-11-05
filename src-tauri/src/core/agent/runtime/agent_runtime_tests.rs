@@ -34,6 +34,63 @@ fn runtime() -> AgentRuntime {
     )
 }
 
+fn executing_bridge(label: &str) -> (AgentRuntime, AgentEventBridge) {
+    let runtime = runtime();
+    let run_id = runtime.create_run(label.to_string());
+    runtime.begin_context_loading(&run_id).unwrap();
+    runtime
+        .context_collected(&run_id, RequestContext::default())
+        .unwrap();
+    runtime.transition(&run_id, AgentState::Executing).unwrap();
+    let bridge = AgentEventBridge {
+        inner: Arc::clone(&runtime.inner),
+        run_id,
+    };
+    (runtime, bridge)
+}
+
+fn emit_failed_shell(bridge: &AgentEventBridge) {
+    bridge.emit(BusEvent::ToolStarted {
+        session_id: "session".into(),
+        subagent_id: None,
+        parent_activity_id: None,
+        message_id: "message".into(),
+        activity_id: "call-1".into(),
+        tool_name: "shell".into(),
+        title: "Run command".into(),
+        kind: "shell".into(),
+        detail: None,
+        arguments: serde_json::json!({}),
+        preview: None,
+    });
+    bridge.emit(BusEvent::ToolFinished {
+        session_id: "session".into(),
+        subagent_id: None,
+        parent_activity_id: None,
+        message_id: "message".into(),
+        activity_id: "call-1".into(),
+        tool_name: "shell".into(),
+        title: "Run command".into(),
+        kind: "shell".into(),
+        detail: None,
+        arguments: serde_json::json!({}),
+        preview: None,
+        result: "failed".into(),
+        success: false,
+        plan_gate: false,
+    });
+}
+
+fn emit_finish(bridge: &AgentEventBridge, reason: &str) {
+    bridge.emit(BusEvent::ChatFinished {
+        session_id: "session".into(),
+        message_id: "message".into(),
+        content: "done".into(),
+        reasoning: None,
+        finish_reason: Some(reason.to_string()),
+    });
+}
+
 #[test]
 fn agent_run_accumulates_model_usage_deltas() {
     let runtime = runtime();
@@ -174,32 +231,17 @@ fn debug_projection_carries_context_tools_and_ordered_states() {
 }
 
 #[test]
-fn failed_tool_moves_run_to_failed() {
-    let runtime = runtime();
-    let run_id = runtime.create_run("run tool".to_string());
-    runtime.begin_context_loading(&run_id).unwrap();
-    runtime
-        .context_collected(&run_id, RequestContext::default())
-        .unwrap();
-    runtime.transition(&run_id, AgentState::Executing).unwrap();
-    runtime.inner.tool_called(
-        &run_id,
-        "call-1",
-        "shell",
-        &serde_json::json!({}),
-        "Run command",
-    );
-    runtime
-        .inner
-        .tool_result(&run_id, "call-1", "shell", false, "failed", &[]);
+fn failed_tool_keeps_the_run_open() {
+    let (runtime, bridge) = executing_bridge("run tool");
+    emit_failed_shell(&bridge);
 
-    let run = runtime.run(&run_id).unwrap();
-    assert_eq!(run.state, AgentState::Failed);
+    let run = runtime.run(&bridge.run_id).unwrap();
+    assert_eq!(run.state, AgentState::Reflecting);
     assert!(run
         .events
         .iter()
         .any(|record| matches!(record.event, AgentEvent::ToolResult { success: false, .. })));
-    assert!(run
+    assert!(!run
         .events
         .iter()
         .any(|record| matches!(record.event, AgentEvent::Error { .. })));
@@ -207,6 +249,65 @@ fn failed_tool_moves_run_to_failed() {
         .steps
         .iter()
         .any(|step| step.status == AgentPlanStepStatus::Failed)));
+    assert!(!run
+        .events
+        .iter()
+        .any(|record| matches!(record.event, AgentEvent::FileChanged { .. })));
+}
+
+#[test]
+fn tool_failure_breaker_fails_the_run() {
+    let (runtime, bridge) = executing_bridge("breaker");
+    emit_failed_shell(&bridge);
+    emit_finish(&bridge, "tool_failure_breaker");
+
+    let run = runtime.run(&bridge.run_id).unwrap();
+    assert_eq!(run.state, AgentState::Failed);
+    assert!(run.events.iter().any(|record| matches!(
+        &record.event,
+        AgentEvent::Error { message } if message == "tool_failure_breaker"
+    )));
+}
+
+#[test]
+fn finished_turn_completes_after_a_failed_tool() {
+    let (runtime, bridge) = executing_bridge("recover");
+    emit_failed_shell(&bridge);
+    emit_finish(&bridge, "stop");
+
+    let run = runtime.run(&bridge.run_id).unwrap();
+    assert_eq!(run.state, AgentState::Completed);
+    assert!(run.plan.as_ref().is_some_and(|plan| plan
+        .steps
+        .iter()
+        .any(|step| step.status == AgentPlanStepStatus::Failed)));
+}
+
+#[test]
+fn cancelled_finish_cancels_after_a_failed_tool() {
+    let (runtime, bridge) = executing_bridge("cancel");
+    emit_failed_shell(&bridge);
+    emit_finish(&bridge, "cancelled");
+
+    let run = runtime.run(&bridge.run_id).unwrap();
+    assert_eq!(run.state, AgentState::Cancelled);
+}
+
+#[test]
+fn chat_error_fails_the_run() {
+    let (runtime, bridge) = executing_bridge("error");
+    bridge.emit(BusEvent::ChatError {
+        session_id: "session".into(),
+        message_id: "message".into(),
+        message: "provider failed".into(),
+    });
+
+    let run = runtime.run(&bridge.run_id).unwrap();
+    assert_eq!(run.state, AgentState::Failed);
+    assert!(run.events.iter().any(|record| matches!(
+        &record.event,
+        AgentEvent::Error { message } if message == "provider failed"
+    )));
 }
 
 #[test]
