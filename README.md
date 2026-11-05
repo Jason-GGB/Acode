@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./public/mascot/mascot-icon.svg" alt="Acode" width="96" height="96" />
+  <img src="./public/mascot/mascot-icon.png" alt="Acode" width="96" height="96" />
 </p>
 
 <h1 align="center">Acode</h1>

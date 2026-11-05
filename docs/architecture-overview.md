@@ -204,11 +204,10 @@ while body stays `only light`. Legacy palette ids map to light/dark in
 
 The workbench window corner is `--peek-window-radius` (16px). On Windows,
 `workbench_glass.rs` sets `DWMWCP_DONOTROUND` and clips the HWND with
-`SetWindowRgn` to the same radius (cleared when maximized). The mascot
-(`components/icons/MascotFace.vue`) is an inline SVG blob filled with
-`--peek-text` (eyes in `--peek-bg`); it follows the pointer, blinks, and exposes
-a `state` prop for agent states plus a `tool` prop for the current chat mode.
-Static assets for the icon/tray live in `public/mascot/` and `src-tauri/icons/`.
+`SetWindowRgn` to the same radius (cleared when maximized). The mascot (`components/icons/MascotFace.vue`) shows the portrait in
+`public/mascot/mascot.png`. Callers still pass `state`, `tool`, and `busy` for
+light status styling. App and tray icons live in `src-tauri/icons/`; the favicon
+is `public/mascot/mascot-icon.png`.
 
 Session identity (`session_id`) is owned by the Rust conversation store. Overlay
 and Workbench may attach to the **same** session concurrently. Companion attaches

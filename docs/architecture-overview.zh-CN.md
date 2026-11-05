@@ -194,7 +194,7 @@ flowchart TB
 
 工作台窗口圆角为 `--peek-window-radius`（16px）。Windows 上 `workbench_glass.rs`
 设置 `DWMWCP_DONOTROUND`，并用 `SetWindowRgn` 把 HWND 裁成同一半径（最大化时清除）。
-吉祥物（`components/icons/MascotFace.vue`）是内联 SVG 的圆润小团子，身体填充 `--peek-text`、眼睛 `--peek-bg`；会跟随鼠标、眨眼，并通过 `state` prop 表现 agent 状态、`tool` prop 表现当前聊天模式。图标 / 托盘等静态资源在 `public/mascot/` 与 `src-tauri/icons/`。
+吉祥物（`components/icons/MascotFace.vue`）使用 `public/mascot/mascot.png` 的二次元头像。调用方仍传入 `state`、`tool` 和 `busy`，用来切换轻微的状态样式。应用图标和托盘图标在 `src-tauri/icons/`，网页图标是 `public/mascot/mascot-icon.png`。
 
 会话标识（`session_id`）由 Rust 会话存储拥有。Overlay 与 Workbench 可同时附着到**同一**会话。Companion 经网关附着并投影同一存储——它不拥有第二套 Agent。
 

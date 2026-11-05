@@ -151,7 +151,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&workbench, &settings, &quit])?;
-    // The tray shows the mascot's front view; the app icon keeps the tilted pose.
+    // Tray icon uses the same mascot portrait as the application icon.
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
         .unwrap_or_else(|_| {
             app.default_window_icon()

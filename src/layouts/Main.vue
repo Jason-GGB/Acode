@@ -944,7 +944,7 @@ const confirmDialogRef = ref<InstanceType<typeof AppConfirmDialog> | null>(null)
 const editWorkspaceDialogRef = ref<InstanceType<typeof EditWorkspaceDialog> | null>(null);
 const renameSessionDialogRef = ref<InstanceType<typeof RenameSessionDialog> | null>(null);
 const composerWrapRef = ref<HTMLElement | null>(null);
-/** True while focus is inside the composer, so the mascot looks at the input. */
+/** True while focus is inside the composer. */
 const composerFocused = ref(false);
 const composerFootprint = ref(0);
 
