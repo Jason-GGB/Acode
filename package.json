@@ -1,7 +1,7 @@
 {
   "name": "Acode",
   "private": true,
-  "version": "0.2.34",
+  "version": "0.1.0",
   "license": "MIT",
   "description": "Hand your work & questions to Acode anytime.",
   "type": "module",

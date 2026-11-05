@@ -1,6 +1,6 @@
 [package]
 name = "peek"
-version = "0.2.34"
+version = "0.1.0"
 license = "MIT"
 description = "Hand your work & questions to Acode anytime."
 authors = ["you"]
@@ -113,3 +113,7 @@ arboard = "3"
 core-foundation = "0.10"
 core-graphics = "0.25"
 objc = "0.2"
+
+# macOS 27 rejects proc-macro dylibs after rustc 1.97 strips them (rust-lang/rust#157750).
+[profile.release.build-override]
+strip = "none"
