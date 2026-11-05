@@ -1,24 +1,32 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use base64::Engine;
 use image::codecs::jpeg::JpegEncoder;
 use image::ImageReader;
+
+#[cfg(windows)]
+use std::sync::OnceLock;
+#[cfg(windows)]
 use windows::core::w;
+#[cfg(windows)]
 use windows::Win32::Foundation::{HGLOBAL, HWND};
+#[cfg(windows)]
 use windows::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     RegisterClipboardFormatW,
 };
+#[cfg(windows)]
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
 use crate::core::context::models::CaptureError;
 
+#[cfg(windows)]
 const CF_DIB: u32 = 8;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const JPEG_QUALITY: u8 = 85;
 
+#[cfg(windows)]
 static CF_PNG: OnceLock<u32> = OnceLock::new();
 
 pub fn is_image_path(path: &Path) -> bool {
@@ -83,10 +91,12 @@ pub fn file_to_data_url(path: &Path) -> Result<String, CaptureError> {
 }
 
 /// Read an image currently on the clipboard and return a JPEG data URL.
+#[cfg(windows)]
 pub fn read_open_clipboard_image_data_url() -> Option<String> {
     read_cf_png().or_else(read_cf_dib_as_jpeg_data_url)
 }
 
+#[cfg(windows)]
 pub fn read_clipboard_image_data_url() -> Option<String> {
     unsafe {
         if OpenClipboard(HWND::default()).is_err() {
@@ -98,10 +108,24 @@ pub fn read_clipboard_image_data_url() -> Option<String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn read_clipboard_image_data_url() -> Option<String> {
+    let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    if image.bytes.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let width = u32::try_from(image.width).ok()?;
+    let height = u32::try_from(image.height).ok()?;
+    let buffer = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())?;
+    encode_dynamic_image_as_jpeg_data_url(image::DynamicImage::ImageRgba8(buffer))
+}
+
+#[cfg(windows)]
 fn png_format() -> u32 {
     *CF_PNG.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("PNG")) })
 }
 
+#[cfg(windows)]
 fn read_cf_png() -> Option<String> {
     unsafe {
         if IsClipboardFormatAvailable(png_format()).is_err() {
@@ -120,6 +144,7 @@ fn read_cf_png() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
 fn read_cf_dib_as_jpeg_data_url() -> Option<String> {
     unsafe {
         if IsClipboardFormatAvailable(CF_DIB).is_err() {
@@ -134,6 +159,7 @@ fn read_cf_dib_as_jpeg_data_url() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
 unsafe fn read_global_bytes(global: HGLOBAL) -> Option<Vec<u8>> {
     let size = GlobalSize(global);
     if size == 0 {
@@ -148,11 +174,13 @@ unsafe fn read_global_bytes(global: HGLOBAL) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+#[cfg(windows)]
 fn encode_dib_as_jpeg_data_url(dib: &[u8]) -> Option<String> {
     let bmp = wrap_dib_in_bmp(dib)?;
     encode_image_bytes_as_jpeg_data_url(&bmp)
 }
 
+#[cfg(windows)]
 fn wrap_dib_in_bmp(dib: &[u8]) -> Option<Vec<u8>> {
     if dib.len() < 40 {
         return None;
@@ -189,6 +217,10 @@ fn encode_image_bytes_as_jpeg_data_url(bytes: &[u8]) -> Option<String> {
         .ok()?
         .decode()
         .ok()?;
+    encode_dynamic_image_as_jpeg_data_url(image)
+}
+
+fn encode_dynamic_image_as_jpeg_data_url(image: image::DynamicImage) -> Option<String> {
     let mut jpeg_bytes = Vec::new();
     let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_bytes, JPEG_QUALITY);
     encoder.encode_image(&image).ok()?;

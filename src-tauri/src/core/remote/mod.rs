@@ -65,7 +65,9 @@ pub fn broadcast_session_snapshots(app: &tauri::AppHandle) {
 }
 
 /// Public compose defaults only; desktop settings also contain private credentials.
-pub fn desktop_defaults_payload(settings: &crate::models::settings::AppSettings) -> serde_json::Value {
+pub fn desktop_defaults_payload(
+    settings: &crate::models::settings::AppSettings,
+) -> serde_json::Value {
     serde_json::json!({
         "chatMode": settings.chat_mode,
         "toolApprovalMode": settings.tool_approval_mode,
@@ -94,9 +96,15 @@ mod defaults_tests {
         let keys: std::collections::BTreeSet<_> = object.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["chatMode", "chatModel", "chatModelProvider", "reasoningEffort", "toolApprovalMode"]
-                .into_iter()
-                .collect(),
+            [
+                "chatMode",
+                "chatModel",
+                "chatModelProvider",
+                "reasoningEffort",
+                "toolApprovalMode"
+            ]
+            .into_iter()
+            .collect(),
         );
     }
 }

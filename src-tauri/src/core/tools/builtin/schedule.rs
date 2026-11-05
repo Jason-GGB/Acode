@@ -111,9 +111,10 @@ fn parse_spec(value: &Value) -> Result<ScheduleSpec, ToolError> {
             })?,
         }),
         "interval" => Ok(ScheduleSpec::Interval {
-            every_minutes: value["everyMinutes"].as_u64().ok_or_else(|| {
-                ToolError::new("interval spec requires everyMinutes")
-            })? as u32,
+            every_minutes: value["everyMinutes"]
+                .as_u64()
+                .ok_or_else(|| ToolError::new("interval spec requires everyMinutes"))?
+                as u32,
         }),
         "daily" => Ok(ScheduleSpec::Daily {
             time: required_str(value, "time")?,

@@ -73,11 +73,10 @@ fn bot_memory_store(bot_id: &str) -> Arc<crate::core::tools::memory::MemoryStore
     store
 }
 
-fn memory_stores() -> &'static OnceLock<Mutex<HashMap<String, Arc<crate::core::tools::memory::MemoryStore>>>>
-{
-    static STORES: OnceLock<
-        Mutex<HashMap<String, Arc<crate::core::tools::memory::MemoryStore>>>,
-    > = OnceLock::new();
+fn memory_stores(
+) -> &'static OnceLock<Mutex<HashMap<String, Arc<crate::core::tools::memory::MemoryStore>>>> {
+    static STORES: OnceLock<Mutex<HashMap<String, Arc<crate::core::tools::memory::MemoryStore>>>> =
+        OnceLock::new();
     &STORES
 }
 

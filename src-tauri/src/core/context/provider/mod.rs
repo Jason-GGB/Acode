@@ -1,7 +1,9 @@
 pub mod active_file_provider;
 mod capture_provider;
+#[cfg_attr(target_os = "macos", path = "clipboard_macos.rs")]
 mod clipboard_provider;
 pub mod environment_provider;
+#[cfg_attr(target_os = "macos", path = "explorer_macos.rs")]
 mod explorer_provider;
 
 pub use capture_provider::{CaptureProvider, CaptureResult, PartialCapture};

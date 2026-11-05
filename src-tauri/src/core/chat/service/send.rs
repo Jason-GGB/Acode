@@ -632,7 +632,6 @@ impl ChatService {
             }
         }
     }
-
 }
 
 fn append_plan_checklist(

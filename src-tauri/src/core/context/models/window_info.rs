@@ -9,7 +9,8 @@ pub struct WindowInfo {
 
 impl WindowInfo {
     pub fn is_explorer(&self) -> bool {
-        self.process_name.eq_ignore_ascii_case("explorer.exe")
+        let name = self.process_name.to_ascii_lowercase();
+        name == "explorer.exe" || name == "finder"
     }
 
     /// Terminal / console hosts where Ctrl+C means SIGINT, not “copy”.
@@ -31,13 +32,22 @@ impl WindowInfo {
                 | "ssh.exe"
                 | "mintty.exe"
                 | "alacritty.exe"
+                | "alacritty"
                 | "wezterm-gui.exe"
                 | "wezterm.exe"
+                | "wezterm"
                 | "kitty.exe"
+                | "kitty"
                 | "hyper.exe"
+                | "hyper"
                 | "tabby.exe"
+                | "tabby"
                 | "fluentterminal.exe"
                 | "windowsterminalpreview.exe"
+                | "terminal"
+                | "iterm2"
+                | "warp"
+                | "ghostty"
         )
     }
 }
@@ -62,5 +72,19 @@ mod tests {
             title: "notes".into(),
         };
         assert!(!notepad.is_terminal());
+        let finder = WindowInfo {
+            hwnd: 0,
+            pid: 1,
+            process_name: "Finder".into(),
+            title: "Desktop".into(),
+        };
+        assert!(finder.is_explorer());
+        let terminal = WindowInfo {
+            hwnd: 0,
+            pid: 1,
+            process_name: "Terminal".into(),
+            title: "shell".into(),
+        };
+        assert!(terminal.is_terminal());
     }
 }

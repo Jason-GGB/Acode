@@ -10,7 +10,9 @@ pub fn safe_mode_marker() -> std::path::PathBuf {
 }
 
 pub fn is_plugin_safe_mode() -> bool {
-    env_flag("ACODE_PLUGIN_SAFE_MODE") || env_flag("ACODE_SAFE_MODE") || safe_mode_marker().is_file()
+    env_flag("ACODE_PLUGIN_SAFE_MODE")
+        || env_flag("ACODE_SAFE_MODE")
+        || safe_mode_marker().is_file()
 }
 
 pub fn plugin_safe_mode_reason() -> String {

@@ -3,15 +3,14 @@ use super::output::{
     append_bounded, format_job_status, format_job_status_with_output, spawn_output_reader,
     take_tail_chars,
 };
-use super::process::terminate_process_tree;
+use super::process::{spawn_shell, terminate_process_tree};
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::error::ToolError;
 #[cfg(windows)]
 use crate::core::tools::sandbox::restricted_process;
 use crate::core::tools::shell_judge::{judge_shell_completion, CompletionVerdict};
-use crate::runtime::terminal::prepare_powershell;
 use std::collections::HashMap;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,26 +61,10 @@ impl ShellJobStore {
             }
             #[cfg(not(windows))]
             {
-                let mut cmd = Command::new("powershell");
-                prepare_powershell(&mut cmd, &command);
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                if let Some(dir) = cwd {
-                    cmd.current_dir(dir);
-                }
-                cmd.spawn()?
+                spawn_shell(&command, cwd)?
             }
         } else {
-            let mut cmd = Command::new("powershell");
-            prepare_powershell(&mut cmd, &command);
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            cmd.spawn()?
+            spawn_shell(&command, cwd)?
         };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

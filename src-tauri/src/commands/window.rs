@@ -73,7 +73,21 @@ pub fn set_window_session_view(window: WebviewWindow, session_id: Option<String>
     }
 }
 
-fn dismiss_matching_notification(
+fn dismiss_matching_notification(app_id: &str, title: &str, body: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return dismiss_matching_notification_windows(app_id, title, body)
+            .map_err(|error| error.to_string());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app_id, title, body);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn dismiss_matching_notification_windows(
     app_id: &str,
     title: &str,
     body: &str,
@@ -229,9 +243,13 @@ pub fn show_interaction_notification(
             .action("open", &request.open_label);
 
         if request.persistent {
+            #[cfg(windows)]
             notification.urgency(notify_rust::Urgency::Critical);
+            #[cfg(target_os = "macos")]
+            notification.timeout(notify_rust::Timeout::Never);
         }
 
+        #[cfg(windows)]
         if !tauri::is_dev() {
             notification.app_id(&app.config().identifier);
         }

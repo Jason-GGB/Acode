@@ -672,7 +672,8 @@ mod tests {
 
     #[test]
     fn reset_marker_blocks_legacy_recovery_even_without_settings() {
-        let root = std::env::temp_dir().join(format!("acode-reset-marker-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("acode-reset-marker-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("settings.json");
         assert!(super::legacy_migration_allowed(&path));

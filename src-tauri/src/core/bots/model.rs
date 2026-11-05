@@ -59,7 +59,9 @@ pub fn next_run_after(spec: &ScheduleSpec, after_ms: i64) -> Result<i64, String>
 
 pub fn validate_spec(spec: &ScheduleSpec) -> Result<(), String> {
     match spec {
-        ScheduleSpec::Once { at_ms } if *at_ms <= 0 => Err("atMs must be a unix millisecond timestamp".into()),
+        ScheduleSpec::Once { at_ms } if *at_ms <= 0 => {
+            Err("atMs must be a unix millisecond timestamp".into())
+        }
         ScheduleSpec::Once { .. } => Ok(()),
         ScheduleSpec::Interval { every_minutes } if *every_minutes == 0 => {
             Err("everyMinutes must be at least 1".into())

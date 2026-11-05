@@ -4,6 +4,7 @@ pub enum CaptureError {
     WindowDetection(String),
     Clipboard(String),
     Explorer(String),
+    #[cfg_attr(not(windows), allow(dead_code))]
     ComInit(String),
 }
 

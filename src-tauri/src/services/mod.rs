@@ -5,6 +5,7 @@ pub mod factory_reset;
 pub mod hotkey;
 pub mod overlay_expand;
 pub mod overlay_native;
+#[cfg_attr(not(windows), path = "pin_badge_stub.rs")]
 pub mod pin_badge;
 pub mod settings_store;
 pub mod webview_theme;

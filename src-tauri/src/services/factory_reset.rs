@@ -176,6 +176,17 @@ fn wait_for_exit(pid: u32) -> Result<(), String> {
     }
     Err("Application did not exit; reset was aborted".into())
 }
+/// Bundle identifier from `tauri.conf.json`, without embedding Info.plist again.
+fn app_identifier() -> Result<String, String> {
+    let config: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json"))
+        .map_err(|error| error.to_string())?;
+    config["identifier"]
+        .as_str()
+        .filter(|identifier| !identifier.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "identifier missing".into())
+}
+
 pub fn run_worker() -> bool {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) != Some(WORKER) {
@@ -187,13 +198,13 @@ pub fn run_worker() -> bool {
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|v| *v > 0 && *v != std::process::id())
             .ok_or("Invalid reset parent")?;
-        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
-        let roots = data_roots(&context.config().identifier)?;
+        let identifier = app_identifier()?;
+        let roots = data_roots(&identifier)?;
         let preserve_settings = args.get(3).map(String::as_str) == Some("keep-settings");
         wait_for_exit(pid)?;
         let config_root = dirs::config_dir()
             .ok_or("Configuration directory unavailable")?
-            .join(&context.config().identifier);
+            .join(&identifier);
         for root in roots {
             let mut result = clear_root(&root, preserve_settings);
             for _ in 0..100 {
@@ -300,7 +311,8 @@ mod tests {
     }
     #[test]
     fn removes_database_sidecars_and_settings_without_touching_other_paths() {
-        let parent = std::env::temp_dir().join(format!("acode-reset-test-{}", uuid::Uuid::new_v4()));
+        let parent =
+            std::env::temp_dir().join(format!("acode-reset-test-{}", uuid::Uuid::new_v4()));
         let root = parent.join("owned");
         std::fs::create_dir_all(root.join("WebView/Local Storage")).unwrap();
         std::fs::write(parent.join("keep.txt"), "keep").unwrap();
@@ -326,7 +338,8 @@ mod tests {
 
     #[test]
     fn information_only_cleanup_retains_reset_marker() {
-        let root = std::env::temp_dir().join(format!("acode-reset-marker-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("acode-reset-marker-{}", uuid::Uuid::new_v4()));
         mark_reset(&root).unwrap();
         std::fs::write(root.join("history.db"), "data").unwrap();
         clear_root(&root, true).unwrap();

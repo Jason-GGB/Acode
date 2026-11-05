@@ -24,7 +24,8 @@ impl LiveEvalConfig {
     pub fn from_env() -> Result<Self, String> {
         let endpoint = std::env::var("ACODE_EVAL_ENDPOINT")
             .map_err(|_| "ACODE_EVAL_ENDPOINT must be a full chat-completions endpoint")?;
-        let model = std::env::var("ACODE_EVAL_MODEL").map_err(|_| "ACODE_EVAL_MODEL is required")?;
+        let model =
+            std::env::var("ACODE_EVAL_MODEL").map_err(|_| "ACODE_EVAL_MODEL is required")?;
         let api_key =
             std::env::var("ACODE_EVAL_API_KEY").map_err(|_| "ACODE_EVAL_API_KEY is required")?;
         let url = reqwest::Url::parse(&endpoint).map_err(|_| "invalid evaluation endpoint")?;

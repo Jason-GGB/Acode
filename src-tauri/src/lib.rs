@@ -12,20 +12,12 @@ pub use core::plugins::run_plugin_host;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rdev::{listen, Event, EventType};
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, RunEvent,
-};
-use windows::Win32::Foundation::POINT;
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
 use app_state::AppState;
 use commands::{
-    app, ask, chat, computer_use, deepseek_files, diff, harness, icons, mcp, opencli,
-    permission, plugins, remote, settings, skills, token_usage, updater, window, workspace,
+    app, ask, chat, computer_use, deepseek_files, diff, harness, icons, mcp, opencli, permission,
+    plugins, remote, settings, skills, token_usage, updater, window, workspace,
 };
+use rdev::{listen, Event, EventType};
 use services::app_lifecycle;
 use services::overlay_native::clear_minimize_pending;
 use services::settings_store::{
@@ -36,17 +28,17 @@ use services::window::{
     mark_blur_guard, should_keep_overlay_visible, show_settings_window, show_workbench_window,
     toggle_overlay,
 };
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, RunEvent,
+};
 
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn cursor_pos() -> Option<(i32, i32)> {
-    let mut pt = POINT::default();
-    unsafe { GetCursorPos(&mut pt).ok().map(|_| (pt.x, pt.y)) }
 }
 
 fn trigger_overlay(app: &AppHandle) {
@@ -58,16 +50,20 @@ fn trigger_overlay(app: &AppHandle) {
         .is_none_or(|window| window.pid == std::process::id())
     {
         let handle = app.clone();
-        let _ = app.run_on_main_thread(move || toggle_overlay(&handle, cursor_pos()));
+        let _ = app.run_on_main_thread(move || {
+            toggle_overlay(&handle, crate::core::context::platform::cursor_pos())
+        });
         return;
     }
     if CAPTURING.swap(true, Ordering::AcqRel) {
         let handle = app.clone();
-        let _ = app.run_on_main_thread(move || toggle_overlay(&handle, cursor_pos()));
+        let _ = app.run_on_main_thread(move || {
+            toggle_overlay(&handle, crate::core::context::platform::cursor_pos())
+        });
         return;
     }
     let handle = app.clone();
-    let mouse = cursor_pos();
+    let mouse = crate::core::context::platform::cursor_pos();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         struct CaptureReset;

@@ -330,7 +330,8 @@ mod tests {
 
     #[test]
     fn rewind_includes_later_files_and_earliest_state() {
-        let base = std::env::temp_dir().join(format!("acode-rewind-multi-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("acode-rewind-multi-{}", uuid::Uuid::new_v4()));
         let workspace = base.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let store = CheckpointStore::new(base.join("checkpoints"));

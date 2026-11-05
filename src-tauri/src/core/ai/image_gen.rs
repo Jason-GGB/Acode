@@ -355,7 +355,9 @@ fn candidate_image_models(
     }
 
     if primary.starts_with("gpt-image-")
-        && provider.map_or(true, |p| !provider_model_is_disabled(p, DEFAULT_IMAGE_MODEL))
+        && provider.map_or(true, |p| {
+            !provider_model_is_disabled(p, DEFAULT_IMAGE_MODEL)
+        })
     {
         push_unique_model(&mut candidates, DEFAULT_IMAGE_MODEL);
     }
@@ -413,7 +415,9 @@ fn generate_one_blocking(
                 Ok(pair) => pair,
                 Err(err) => {
                     last_error = err;
-                    if model_idx + 1 < candidate_models.len() || attempt + 1 < MAX_TRANSIENT_ATTEMPTS {
+                    if model_idx + 1 < candidate_models.len()
+                        || attempt + 1 < MAX_TRANSIENT_ATTEMPTS
+                    {
                         continue;
                     }
                     return Err(last_error);
@@ -915,7 +919,10 @@ mod tests {
     fn transient_529_overloaded_is_detected() {
         let body = r#"{"error":{"message":"upstream throttled (no usable account), retry shortly","type":"overloaded_error"}}"#;
         assert!(is_transient_image_http_error(529, body));
-        assert!(!is_transient_image_http_error(401, r#"{"error":"unauthorized"}"#));
+        assert!(!is_transient_image_http_error(
+            401,
+            r#"{"error":"unauthorized"}"#
+        ));
         let msg = images_http_error(529, "https://www.micuapi.ai/v1/images/generations", body);
         assert!(msg.contains("529"));
         assert!(msg.contains("overloaded"));

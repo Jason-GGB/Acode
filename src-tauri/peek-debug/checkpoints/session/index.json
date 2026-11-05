@@ -1,0 +1,20 @@
+{
+  "checkpoints": [
+    {
+      "turn": 1,
+      "time": 1793874735,
+      "prompt": "keep",
+      "files": [],
+      "userMessageId": "msg-dd476df0-8fad-4001-a1a3-e0afd399a3f1",
+      "workspaceRoot": null
+    },
+    {
+      "turn": 2,
+      "time": 1793874735,
+      "prompt": "rewind",
+      "files": [],
+      "userMessageId": "msg-f9309e45-4bc5-47a5-bf54-6af4fca69653",
+      "workspaceRoot": null
+    }
+  ]
+}

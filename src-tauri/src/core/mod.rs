@@ -5,8 +5,8 @@
 //! the crate-root `crate::runtime` module (different meaning — see that overview).
 
 pub mod agent;
-pub mod bots;
 pub mod ai;
+pub mod bots;
 pub mod chat;
 pub mod checkpoint;
 pub mod context;

@@ -3,15 +3,13 @@ use super::output::{
     drain_available, drain_until_quiet, format_duration, format_streams, settle_ambiguous,
     spawn_drain_thread,
 };
-use super::process::terminate_process_tree;
+use super::process::{spawn_shell, terminate_process_tree};
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::error::ToolError;
 #[cfg(windows)]
 use crate::core::tools::sandbox::restricted_process;
 use crate::core::tools::shell_judge::{judge_shell_completion, CompletionVerdict};
 use crate::runtime::encoding::decode_process_bytes;
-use crate::runtime::terminal::prepare_powershell;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -105,26 +103,10 @@ pub(crate) fn run_foreground_with_policy(
         }
         #[cfg(not(windows))]
         {
-            let mut cmd = Command::new("powershell");
-            prepare_powershell(&mut cmd, command);
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            cmd.spawn()?
+            spawn_shell(command, cwd)?
         }
     } else {
-        let mut cmd = Command::new("powershell");
-        prepare_powershell(&mut cmd, command);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        cmd.spawn()?
+        spawn_shell(command, cwd)?
     };
     let probe = crate::core::tools::process_stats::ActivityProbe::attach(&child);
     let activity_measurable = probe.is_measurable();

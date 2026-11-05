@@ -49,7 +49,14 @@ pub fn selection_for(window: &WindowInfo) -> Option<BrowserSelection> {
 fn browser_window(window: &WindowInfo) -> bool {
     matches!(
         window.process_name.to_ascii_lowercase().as_str(),
-        "chrome.exe" | "msedge.exe" | "brave.exe" | "vivaldi.exe"
+        "chrome.exe"
+            | "msedge.exe"
+            | "brave.exe"
+            | "vivaldi.exe"
+            | "google chrome"
+            | "microsoft edge"
+            | "brave browser"
+            | "vivaldi"
     )
 }
 fn accept_packet(packet: Packet, token: &str) -> bool {

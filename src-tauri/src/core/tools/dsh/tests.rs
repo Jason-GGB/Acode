@@ -178,7 +178,10 @@ fn dsh_registry_is_separate_preserves_exact_schemas_and_plan_gate() {
     for schema in dsh.schemas() {
         let name = schema["function"]["name"].as_str().unwrap();
         if HOST_TOOLS.contains(&name) {
-            assert!(old.schemas().contains(&schema), "host schema changed: {name}");
+            assert!(
+                old.schemas().contains(&schema),
+                "host schema changed: {name}"
+            );
             continue;
         }
         assert!(

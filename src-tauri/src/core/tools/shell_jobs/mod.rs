@@ -12,6 +12,7 @@ pub use process::terminate_process_tree;
 pub use types::ShellJobStore;
 
 #[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod tests {
     use super::constants::{IDLE_CHECK_GRACE, IDLE_CHECK_MIN_INTERVAL, IDLE_JUDGE_ROUNDS};
     use super::foreground::{
@@ -90,6 +91,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn background_job_is_registered_before_waiter_runs() {
         let store = ShellJobStore::new();
         let id = store
@@ -111,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn foreground_command_stops_when_cancelled() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&cancelled);
@@ -137,6 +140,7 @@ mod tests {
         assert!(background_allowed("Get-Content -Wait -Tail 100 app.log"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn background_output_is_readable_before_process_exits() {
         let store = ShellJobStore::new();
@@ -181,6 +185,7 @@ mod tests {
     /// never arrives. Foreground must still return promptly with the output
     /// collected so far.
     #[test]
+    #[cfg(windows)]
     fn foreground_returns_when_descendant_holds_pipe() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
@@ -205,6 +210,7 @@ mod tests {
     /// A completion-looking summary can precede additional work. Model
     /// suggestions must not override the live process's actual exit.
     #[test]
+    #[cfg(windows)]
     fn completion_suggestion_does_not_kill_a_live_process() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
@@ -236,6 +242,7 @@ mod tests {
     /// While the model judge keeps saying the task is still running, the
     /// process must not be killed early — it should keep waiting.
     #[test]
+    #[cfg(windows)]
     fn foreground_keeps_waiting_while_judged_running() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let (context, db_path) = context_with_verdict("RUNNING");
@@ -382,6 +389,7 @@ mod tests {
     /// linking, packing) must be allowed to keep going even though its stall
     /// window has long since passed in output terms.
     #[test]
+    #[cfg(windows)]
     fn silent_but_busy_commands_are_not_killed() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let policy = WaitPolicy {
@@ -407,6 +415,7 @@ mod tests {
 
     /// Low CPU and silence can describe a healthy I/O wait.
     #[test]
+    #[cfg(windows)]
     fn silent_io_wait_is_not_stopped_at_the_stall_window() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let policy = WaitPolicy {
@@ -436,6 +445,7 @@ mod tests {
     /// Same held-pipe scenario through the background path: the job must be
     /// published as done instead of hanging until the daemon exits.
     #[test]
+    #[cfg(windows)]
     fn background_job_finishes_when_descendant_holds_pipe() {
         let store = ShellJobStore::new();
         let id = store
