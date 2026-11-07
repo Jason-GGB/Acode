@@ -309,9 +309,7 @@ fn now_secs() -> u64 {
 pub fn shared_checkpoint_store() -> &'static CheckpointStore {
     static STORE: OnceLock<CheckpointStore> = OnceLock::new();
     STORE.get_or_init(|| {
-        let root = std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."))
+        let root = crate::core::tools::memory::app_data_root()
             .join(if cfg!(debug_assertions) {
                 "peek-debug"
             } else {

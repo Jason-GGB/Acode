@@ -17,7 +17,7 @@ use commands::{
     app, ask, chat, computer_use, deepseek_files, diff, harness, icons, mcp, opencli, permission,
     plugins, remote, settings, skills, token_usage, updater, window, workspace,
 };
-use rdev::{listen, Event, EventType};
+use rdev::{Event, EventType};
 use services::app_lifecycle;
 use services::overlay_native::clear_minimize_pending;
 use services::settings_store::{
@@ -136,8 +136,8 @@ fn start_hotkey_listener(app: AppHandle) {
             }
         };
 
-        if let Err(error) = listen(callback) {
-            eprintln!("failed to listen for global shortcuts: {error:?}");
+        if let Err(error) = crate::services::hotkey_listen::listen(callback) {
+            eprintln!("failed to listen for global shortcuts: {error}");
         }
     });
 }

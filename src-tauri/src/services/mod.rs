@@ -3,6 +3,7 @@ pub mod browser_selection;
 pub mod computer_use_hud;
 pub mod factory_reset;
 pub mod hotkey;
+pub mod hotkey_listen;
 pub mod overlay_expand;
 pub mod overlay_native;
 #[cfg_attr(not(windows), path = "pin_badge_stub.rs")]

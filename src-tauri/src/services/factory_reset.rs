@@ -99,16 +99,13 @@ fn data_roots(id: &str) -> Result<Vec<PathBuf>, String> {
         }
     }
     // Local skills/plugins and memory use a separate application-owned root.
-    if let Some(base) = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-    {
-        roots.push(base.join(if cfg!(debug_assertions) {
+    roots.push(
+        crate::core::tools::memory::app_data_root().join(if cfg!(debug_assertions) {
             "Acode Debug"
         } else {
             "Acode"
-        }));
-    }
+        }),
+    );
     #[cfg(target_os = "macos")]
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join("Library/Logs").join(id));

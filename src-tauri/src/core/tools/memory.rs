@@ -612,15 +612,28 @@ fn now_secs() -> u64 {
 pub fn default_memory_path() -> PathBuf {
     dirs_path().join("memories.json")
 }
-fn dirs_path() -> PathBuf {
-    std::env::var("APPDATA")
+/// 用户数据根目录：Windows 取 `%APPDATA%`，其他平台取系统用户数据目录，绝不使用相对路径。
+pub fn app_data_root() -> PathBuf {
+    resolve_app_data_root(std::env::var_os("APPDATA"), dirs::data_dir())
+}
+
+fn resolve_app_data_root(
+    appdata: Option<std::ffi::OsString>,
+    data_dir: Option<PathBuf>,
+) -> PathBuf {
+    appdata
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(if cfg!(debug_assertions) {
-            "Acode Debug"
-        } else {
-            "Acode"
-        })
+        .filter(|path| path.is_absolute())
+        .or(data_dir)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn dirs_path() -> PathBuf {
+    app_data_root().join(if cfg!(debug_assertions) {
+        "Acode Debug"
+    } else {
+        "Acode"
+    })
 }
 pub fn skills_dir() -> PathBuf {
     dirs_path().join("skills")
@@ -642,6 +655,25 @@ pub fn shared_memory_store() -> Arc<MemoryStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_data_root_is_never_relative() {
+        let data = PathBuf::from("/Users/x/Library/Application Support");
+        assert_eq!(
+            resolve_app_data_root(None, Some(data.clone())),
+            data,
+            "macOS has no APPDATA and must use the user data dir"
+        );
+        assert_eq!(
+            resolve_app_data_root(Some("relative".into()), Some(data.clone())),
+            data
+        );
+        assert_eq!(
+            resolve_app_data_root(Some("/win/appdata".into()), Some(data)),
+            PathBuf::from("/win/appdata")
+        );
+        assert!(resolve_app_data_root(None, None).is_absolute());
+    }
 
     #[test]
     fn rules_accept_durable_preferences() {
